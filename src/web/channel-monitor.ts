@@ -9,11 +9,13 @@ import {
   agentHasChannel,
   agentSessionName,
   capturePane,
+  dismissResumeSummaryModalIfPresent,
   isAgentRunning,
   sendPromptToSession,
   startAgentProcess,
   stopAgentProcess,
 } from './agent-process.js'
+import { reapChannelOrphans } from './channel-poller-reap.js'
 import { detectPaneState, decidePaneErrorAlert, type PaneErrorAlertState } from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
@@ -246,6 +248,21 @@ function readConfiguredMainModel(): string {
 function resumeMarveenSession(): boolean {
   const provider = getProvider(getMainAgentProvider())
   try {
+    // Reap any orphan bun/node poller BEFORE we respawn. `tmux respawn-pane -k`
+    // kills the parent claude process but leaves grandchild pollers running -
+    // see channel-poller-reap.ts for the full background. Without this, the
+    // freshly-respawned --continue session would race a still-alive poller for
+    // the same bot token (409 Conflict on getUpdates) and stage 3 would fail
+    // exactly the way it did 2026-06-01 13:09 / 13:51 / 15:03, forcing the
+    // recovery to fall through to stage 4 hard restart and lose conversation
+    // context. The reap is best-effort: any failure logs and the respawn
+    // continues, because a stale orphan is better than no respawn at all.
+    try {
+      reapChannelOrphans(provider.type, PROJECT_ROOT)
+    } catch (err) {
+      logger.warn({ err }, 'resumeMarveenSession: pre-respawn reap failed (continuing)')
+    }
+
     const model = readConfiguredMainModel()
     const claudeCmd = [
       'export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
@@ -264,6 +281,20 @@ function resumeMarveenSession(): boolean {
       `--channels plugin:${provider.pluginId}`,
     ].join(' ')
     execFileSync(TMUX, ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+
+    // --continue replays the last conversation. When the prior session is
+    // large (>200k tokens) Claude Code opens with a "Resume from summary"
+    // modal that parks the prompt - the plugin never reaches the inbound-
+    // ready state, detectPaneState stays 'unknown', and stage 3 silently
+    // times out into stage 4. The agent-process startup path already dismisses
+    // this modal; we do the same here so the resume path matches.
+    try {
+      execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
+      dismissResumeSummaryModalIfPresent(MAIN_CHANNELS_SESSION)
+    } catch (err) {
+      logger.warn({ err }, 'resumeMarveenSession: post-respawn modal dismiss failed (continuing)')
+    }
+
     logger.warn({ provider: provider.type }, 'Marveen session respawned with --continue')
     return true
   } catch (err) {
@@ -272,7 +303,13 @@ function resumeMarveenSession(): boolean {
   }
 }
 
-const RESUME_GRACE_MS = 90_000
+// Bumped 90s -> 150s 2026-06-01: --continue + plugin re-init on a
+// large-context session can take past 90s, and the channel-monitor poll only
+// re-evaluates every 60s, so the previous window left ~30s of safety margin
+// before stage 4 fired. With the new reap+modal-dismiss path the resume
+// itself should succeed more often, but the budget still has to cover plugin
+// re-handshake + first getUpdates round-trip on the upstream provider.
+const RESUME_GRACE_MS = 150_000
 let marveenLastHardRestart = 0
 const MARVEEN_HARD_RESTART_GRACE_MS = 120_000
 

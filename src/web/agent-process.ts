@@ -302,7 +302,7 @@ function dismissSurveyModalIfPresent(session: string): void {
 // pick option 1 (Resume from summary, recommended) and Enter to confirm.
 const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
 
-function dismissResumeSummaryModalIfPresent(session: string): void {
+export function dismissResumeSummaryModalIfPresent(session: string): void {
   try {
     const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
     if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
