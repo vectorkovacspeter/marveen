@@ -7180,6 +7180,17 @@ async function loadMessagesPage() {
 }
 
 const CHAT_SYSTEM_AGENTS = new Set(['heartbeat','telegram-coordinator','channel-coordinator'])
+const CHAT_OWNER_AGENT = 'Szabolcs' // pinned to top; display label overridden
+
+function chatLastSeenKey(agentName) { return 'chat_last_seen_' + agentName }
+function chatGetLastSeen(agentName) { return parseInt(localStorage.getItem(chatLastSeenKey(agentName)) || '0', 10) }
+function chatMarkSeen(agentName, maxId) {
+  if (maxId > chatGetLastSeen(agentName)) localStorage.setItem(chatLastSeenKey(agentName), String(maxId))
+}
+function chatIsUnread(agentName, threadInfo) {
+  if (!threadInfo?.lastMsg) return false
+  return threadInfo.lastMsg.id > chatGetLastSeen(agentName)
+}
 
 async function loadChatAgentList() {
   const sidebar = document.getElementById('chatAgentList')
@@ -7217,8 +7228,10 @@ async function loadChatAgentList() {
       }
     }
 
-    // Sort: agents with messages first (by recency), rest alphabetical
+    // Sort: owner pinned first, then agents with messages by recency, rest alphabetical
     const sorted = [...fleetNames].sort((a, b) => {
+      if (a === CHAT_OWNER_AGENT) return -1
+      if (b === CHAT_OWNER_AGENT) return 1
       const aHas = threadIndex.has(a), bHas = threadIndex.has(b)
       if (aHas && !bHas) return -1
       if (!aHas && bHas) return 1
@@ -7237,11 +7250,13 @@ async function loadChatAgentList() {
       const preview = lm ? (lm.content || '').replace(/\n/g,' ').slice(0, 60) : 'Nincs üzenet'
       const isSelected = name === chatSelectedAgent ? ' selected' : ''
       const dimmed = info ? '' : ' style="opacity:0.5"'
-      return `<div class="chat-agent-item${isSelected}" data-agent="${escapeHtml(name)}"${dimmed}>
+      const unread = chatIsUnread(name, info)
+      const displayName = name === CHAT_OWNER_AGENT ? 'Szabolcs (te)' : name
+      return `<div class="chat-agent-item${isSelected}${unread ? ' unread' : ''}" data-agent="${escapeHtml(name)}"${dimmed}>
         <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
         <div class="chat-agent-info">
-          <div class="chat-agent-name">${escapeHtml(name)}</div>
-          <div class="chat-agent-preview">${escapeHtml(preview)}</div>
+          <div class="chat-agent-name">${escapeHtml(displayName)}${unread ? '<span class="chat-unread-dot"></span>' : ''}</div>
+          <div class="chat-agent-preview ${unread ? 'unread-preview' : ''}">${escapeHtml(preview)}</div>
         </div>
         <div class="chat-agent-time">${when}</div>
       </div>`
@@ -7279,10 +7294,12 @@ async function loadChatThread(agentName) {
   chatThreadState.hasMore = true
   chatThreadState.loading = false
 
+  const threadDisplayName = agentName === CHAT_OWNER_AGENT ? 'Szabolcs (te)' : agentName
+
   panel.innerHTML = `
     <div class="chat-thread-header">
       ${chatAvatarHtml(agentName, 32)}
-      <span class="chat-thread-title">${escapeHtml(agentName)}</span>
+      <span class="chat-thread-title">${escapeHtml(threadDisplayName)}</span>
       <button class="btn-secondary btn-compact" style="margin-left:auto" onclick="loadChatThread('${escapeHtml(agentName)}')">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
       </button>
@@ -7303,6 +7320,18 @@ async function loadChatThread(agentName) {
 
   // Initial load
   await fetchChatPage(agentName, null, CHAT_PAGE_SIZE, 'replace')
+  // Mark thread as read (localStorage last-seen)
+  const threadData = (await fetch('/api/messages/threads').then(r => r.ok ? r.json() : []).catch(() => []))
+    .find(t => t.agent === agentName)
+  if (threadData?.lastMessage?.id) {
+    chatMarkSeen(agentName, threadData.lastMessage.id)
+    // Remove unread indicator from sidebar item
+    document.querySelector(`.chat-agent-item[data-agent="${CSS.escape(agentName)}"]`)?.classList.remove('unread')
+    const dot = document.querySelector(`.chat-agent-item[data-agent="${CSS.escape(agentName)}"] .chat-unread-dot`)
+    if (dot) dot.remove()
+    const preview = document.querySelector(`.chat-agent-item[data-agent="${CSS.escape(agentName)}"] .unread-preview`)
+    if (preview) preview.classList.remove('unread-preview')
+  }
 
   // Scroll-up pagination handler
   const bubbles = document.getElementById('chatBubbles')
