@@ -79,6 +79,8 @@ const pages = document.querySelectorAll('.page')
 function switchPage(pageId) {
   pages.forEach((p) => (p.hidden = p.id !== pageId + 'Page'))
   navLinks.forEach((l) => l.classList.toggle('active', l.dataset.page === pageId))
+  // Kanban needs full-width layout (overrides main's max-width: 1200px)
+  document.querySelector('main').classList.toggle('kanban-active', pageId === 'kanban')
   // Activity page runs a live poll; stop it whenever we navigate away.
   if (pageId !== 'activity') stopActivityPoll()
   if (pageId === 'activity') startActivityPoll()
@@ -413,12 +415,33 @@ function setupAssigneeFilter() {
 }
 
 function renderKanban() {
-  const grouped = { planned: [], in_progress: [], waiting: [], done: [] }
+  const cardById = new Map(kanbanCards.map(c => [c.id, c]))
   const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
+
+  // Determine which top-level cards are visible under current filters.
+  const visibleCardIds = new Set()
   for (const card of kanbanCards) {
     if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) continue
-    // Assignee filter (case-insensitive). Empty = no filter.
     if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) continue
+    visibleCardIds.add(card.id)
+  }
+
+  // A subtask is "embedded" when its parent is visible AND both share the same
+  // column. Embedded subtasks are hidden as standalone cards and rendered
+  // inside the parent card instead. Filter state of the subtask itself is
+  // intentionally ignored so it always shows under its visible parent.
+  const embeddedSubtaskIds = new Set()
+  for (const card of kanbanCards) {
+    if (!card.parent_id) continue
+    const parent = cardById.get(card.parent_id)
+    if (!parent || !visibleCardIds.has(parent.id)) continue
+    if (parent.status === card.status) embeddedSubtaskIds.add(card.id)
+  }
+
+  const grouped = { planned: [], in_progress: [], waiting: [], done: [] }
+  for (const card of kanbanCards) {
+    if (embeddedSubtaskIds.has(card.id)) continue
+    if (!visibleCardIds.has(card.id)) continue
     if (grouped[card.status]) grouped[card.status].push(card)
   }
 
@@ -428,46 +451,44 @@ function renderKanban() {
     cards.sort((a, b) => a.sort_order - b.sort_order)
 
     for (const card of cards) {
-      col.appendChild(createCardEl(card))
+      const embeddedChildren = kanbanCards
+        .filter(c => c.parent_id === card.id && embeddedSubtaskIds.has(c.id))
+        .sort((a, b) => a.sort_order - b.sort_order)
+      col.appendChild(createCardEl(card, embeddedChildren))
     }
   }
 
-  // Update counts
+  // Update counts (embedded subtasks don't count as separate cards)
   document.getElementById('countPlanned').textContent = grouped.planned.length
   document.getElementById('countInProgress').textContent = grouped.in_progress.length
   document.getElementById('countWaiting').textContent = grouped.waiting.length
   document.getElementById('countDone').textContent = grouped.done.length
 
-  // Async parent-badge: fetch children count per card, show badge if any
-  loadSubtaskBadges()
+  // Badge: only count subtasks that are in a different column (not embedded here)
+  updateSubtaskBadges(embeddedSubtaskIds)
 }
 
-async function loadSubtaskBadges() {
-  const cardEls = document.querySelectorAll('.kanban-card[data-id]')
-  await Promise.all([...cardEls].map(async (el) => {
+function updateSubtaskBadges(embeddedSubtaskIds) {
+  for (const el of document.querySelectorAll('.kanban-card[data-id]')) {
     const id = el.dataset.id
-    try {
-      const res = await fetch(`/api/kanban/${encodeURIComponent(id)}/children`)
-      if (!res.ok) return
-      const children = await res.json()
-      const badge = el.querySelector('.kanban-subtask-badge')
-      if (!badge) return
-      if (children.length > 0) {
-        badge.textContent = `${children.length} subtask`
-        badge.style.display = ''
-        badge.onclick = (e) => {
-          e.stopPropagation()
-          const card = kanbanCards.find((c) => c.id === id)
-          if (card) showCardDetail(card)
-        }
-      } else {
-        badge.style.display = 'none'
+    const badge = el.querySelector('.kanban-subtask-badge')
+    if (!badge) continue
+    const nonEmbedded = kanbanCards.filter(c => c.parent_id === id && !embeddedSubtaskIds.has(c.id))
+    if (nonEmbedded.length > 0) {
+      badge.textContent = `${nonEmbedded.length} subtask`
+      badge.style.display = ''
+      badge.onclick = (e) => {
+        e.stopPropagation()
+        const card = kanbanCards.find(c => c.id === id)
+        if (card) showCardDetail(card)
       }
-    } catch { /* ignore */ }
-  }))
+    } else {
+      badge.style.display = 'none'
+    }
+  }
 }
 
-function createCardEl(card) {
+function createCardEl(card, embeddedChildren = []) {
   const el = document.createElement('div')
   el.className = 'kanban-card'
   el.dataset.id = card.id
@@ -509,6 +530,21 @@ function createCardEl(card) {
     ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>`
     : ''
 
+  // Embedded subtasks: rendered as mini-cards below a divider when the subtask
+  // shares the same column as this parent card.
+  let embeddedHtml = ''
+  if (embeddedChildren.length > 0) {
+    const items = embeddedChildren.map(c => {
+      const rawCa = c.assignee ? String(c.assignee).trim() : ''
+      const ca = rawCa ? kanbanAssignees.find(a => a.name.toLowerCase() === rawCa.toLowerCase()) : null
+      const caLabel = ca ? (ca.displayName || ca.name) : rawCa
+      const caHtml = caLabel ? `<span class="kanban-embedded-assignee">${escapeHtml(caLabel)}</span>` : ''
+      const cSeq = c.seq != null ? `<span class="kanban-embedded-seq">#${c.seq}</span> ` : ''
+      return `<div class="kanban-embedded-subtask" data-id="${escapeHtml(c.id)}">${cSeq}${escapeHtml(c.title)}${caHtml}</div>`
+    }).join('')
+    embeddedHtml = `<div class="kanban-embedded-subtasks">${items}</div>`
+  }
+
   el.innerHTML = `
     ${projectHtml}
     <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
@@ -517,12 +553,22 @@ function createCardEl(card) {
       <button class="card-breakdown-btn" title="AI szétbont" aria-label="AI szétbont">⚡</button>
     </div>
     <div class="kanban-subtask-badge" style="display:none"></div>
+    ${embeddedHtml}
   `
 
   // "AI szétbont" gomb – ne nyissa meg a detail modalt
   el.querySelector('.card-breakdown-btn').addEventListener('click', (e) => {
     e.stopPropagation()
     triggerBreakdown(card)
+  })
+
+  // Click on embedded subtask -> open that subtask's detail (don't bubble to parent)
+  el.querySelectorAll('.kanban-embedded-subtask').forEach(subEl => {
+    subEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const child = kanbanCards.find(c => c.id === subEl.dataset.id)
+      if (child) showCardDetail(child)
+    })
   })
 
   // Drag events
@@ -3768,6 +3814,9 @@ function renderScheduleList(tasks) {
         <button class="btn-icon" data-action="toggle" title="${task.enabled ? 'Szüneteltetés' : 'Folytatás'}">
           ${task.enabled ? pauseIcon() : playIcon()}
         </button>
+        <button class="btn-icon" data-action="history" title="Futtatási előzmények">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+        </button>
         <button class="btn-icon btn-icon-danger" data-action="delete" title="Törlés">
           ${trashIcon()}
         </button>
@@ -3811,8 +3860,67 @@ function renderScheduleList(tasks) {
       } catch { showToast('Hiba a törlés során') }
     })
 
+    row.querySelector('[data-action="history"]').addEventListener('click', async (e) => {
+      e.stopPropagation()
+      openScheduleRunHistory(task.name)
+    })
+
     scheduleList.appendChild(row)
   }
+}
+
+const scheduleRunHistoryOverlay = document.getElementById('scheduleRunHistoryOverlay')
+document.getElementById('scheduleRunHistoryClose').addEventListener('click', () => closeModal(scheduleRunHistoryOverlay))
+scheduleRunHistoryOverlay.addEventListener('click', (e) => { if (e.target === scheduleRunHistoryOverlay) closeModal(scheduleRunHistoryOverlay) })
+
+const RUN_STATUS_LABEL = {
+  fired: 'Rendben',
+  error: 'Hiba',
+  skipped: 'Kihagyva',
+}
+const RUN_STATUS_CLASS = {
+  fired: 'badge-active',
+  error: 'badge-danger',
+  skipped: 'badge-paused',
+}
+
+async function openScheduleRunHistory(taskName) {
+  document.getElementById('scheduleRunHistoryTitle').textContent = `Előzmények: ${taskName}`
+  const body = document.getElementById('scheduleRunHistoryBody')
+  body.innerHTML = '<p>Betöltés...</p>'
+  openModal(scheduleRunHistoryOverlay)
+  try {
+    const r = await fetch(`/api/schedules/${encodeURIComponent(taskName)}/runs`)
+    const runs = await r.json()
+    if (!Array.isArray(runs) || runs.length === 0) {
+      body.innerHTML = '<p class="hint">Még nincs rögzített futtatás.</p>'
+      return
+    }
+    const rows = runs.map(run => {
+      const d = new Date(run.ts)
+      const date = d.toLocaleDateString('hu-HU', { month: 'short', day: 'numeric' })
+      const time = d.toLocaleTimeString('hu-HU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      const label = RUN_STATUS_LABEL[run.status] || run.status
+      const cls = RUN_STATUS_CLASS[run.status] || 'badge-paused'
+      const tokens = run.tokens_est !== null ? `~${run.tokens_est.toLocaleString()}` : '-'
+      return `<tr>
+        <td style="white-space:nowrap">${date} ${time}</td>
+        <td><span class="badge ${cls}">${escapeHtml(label)}</span></td>
+        <td style="text-align:right;font-variant-numeric:tabular-nums">${tokens}</td>
+      </tr>`
+    }).join('')
+    body.innerHTML = `<table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">Időpont</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">Állapot</th>
+        <th style="text-align:right;padding:4px 8px;border-bottom:1px solid var(--border)">Token (kb.)</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+    body.querySelectorAll('tbody tr').forEach(tr => {
+      tr.querySelectorAll('td').forEach(td => { td.style.padding = '5px 8px'; td.style.borderBottom = '1px solid var(--border-light, #eee)' })
+    })
+  } catch { body.innerHTML = '<p class="hint">Hiba az előzmények betöltésekor.</p>' }
 }
 
 function renderTimeline(tasks) {
@@ -7965,7 +8073,12 @@ async function loadOverview() {
   }
 }
 
-// Brand mark: use main agent's avatar if available
+// Brand mark + product-brand chrome: pull the configured brand from
+// /api/marveen and apply it to the dashboard chrome (tab title, mobile topbar,
+// sidebar name, updates subtitle). brandName is the product/system name and is
+// distinct from the main agent's display name; the backend defaults brandName to
+// BOT_NAME, so a brand-unaware install keeps showing the agent name. If the
+// field is absent (legacy backend) the existing HTML default text is kept.
 async function initSidebarBrand() {
   try {
     const img = document.createElement('img')
@@ -7977,8 +8090,16 @@ async function initSidebarBrand() {
     const res = await fetch('/api/marveen')
     if (res.ok) {
       const m = await res.json()
-      const name = document.getElementById('sidebarBrandName')
-      if (name && m.name) name.textContent = m.name
+      const brand = m.brandName || m.name
+      if (brand) {
+        document.title = brand
+        const topbar = document.getElementById('mobileTopbarTitle')
+        if (topbar) topbar.textContent = brand
+        const name = document.getElementById('sidebarBrandName')
+        if (name) name.textContent = brand
+        const subtitle = document.getElementById('updatesSubtitle')
+        if (subtitle) subtitle.textContent = `${brand} verzió ellenőrzés`
+      }
     }
   } catch {}
 }

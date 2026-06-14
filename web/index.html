@@ -20,7 +20,7 @@
     <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Menü" aria-expanded="false">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <span class="mobile-topbar-title">Marveen</span>
+    <span class="mobile-topbar-title" id="mobileTopbarTitle">Marveen</span>
   </div>
   <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
   <aside class="sidebar">
@@ -1869,6 +1869,20 @@
             <span class="btn-loading" hidden><span class="spinner"></span> Importálás...</span>
           </button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Schedule Run History -->
+  <div class="modal-overlay" id="scheduleRunHistoryOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="scheduleRunHistoryTitle">Futtatási előzmények</h2>
+        <button class="modal-close" id="scheduleRunHistoryClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint" style="margin-bottom:0.75rem">Utolsó 10 futtatás. Tokenszám becslés: az ágens tokenforgalma a futtatás utáni 1 órában (közelítő érték).</p>
+        <div id="scheduleRunHistoryBody"></div>
       </div>
     </div>
   </div>
