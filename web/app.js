@@ -814,6 +814,41 @@ async function showCardDetail(card) {
 
   document.getElementById('cardDetailDesc').textContent = card.description || ''
 
+  // #115: Parent meta row — dropdown replaces the old read-only display; shown only when editable
+  const parentMetaItem = document.getElementById('parentMetaItem')
+  const parentSelect = document.getElementById('parentSelect')
+  const canModifyParent = card.status === 'planned' || card.status === 'waiting'
+  if (card.parent_id && canModifyParent) {
+    // Build the parent-select dropdown: null option + all top-level non-done tasks
+    parentSelect.innerHTML = '<option value="">Üres (nincs szülő)</option>'
+    const availableParents = kanbanCards.filter(c =>
+      !c.parent_id && c.id !== card.id && !c.archived_at &&
+      (c.status === 'planned' || c.status === 'in_progress' || c.status === 'waiting')
+    )
+    for (const p of availableParents) {
+      const opt = document.createElement('option')
+      opt.value = p.id
+      const fullLabel = (p.seq != null ? `#${p.seq} ` : '') + p.title
+      opt.title = fullLabel
+      opt.textContent = fullLabel.length > 33 ? fullLabel.slice(0, 32) + '…' : fullLabel
+      if (p.id === card.parent_id) opt.selected = true
+      parentSelect.appendChild(opt)
+    }
+    parentSelect.onchange = async () => {
+      const newParentId = parentSelect.value || null
+      const label = newParentId ? 'Szülő módosítva' : 'Szülő leválasztva'
+      const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...card, parent_id: newParentId }),
+      })
+      if (r.ok) { card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card) }
+      else showToast('Hiba a mentésnél')
+    }
+    parentMetaItem.style.display = ''
+  } else {
+    parentMetaItem.style.display = 'none'
+  }
+
   // Load comments
   try {
     const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`)
@@ -840,7 +875,7 @@ async function showCardDetail(card) {
   // (Resolution of the #254/#241 overlap: keep #241's type-resolved default
   // over #254's hard-coded "Gábor" -- same deployment-agnostic reasoning.)
   const defaultCommentAuthor =
-    (kanbanAssignees.find((a) => a.type === 'bot') || kanbanAssignees[0] || {}).name || ''
+    (kanbanAssignees.find((a) => a.type === 'owner') || kanbanAssignees[0] || {}).name || ''
   populateAssigneeSelect('commentAuthor', defaultCommentAuthor)
 
   // Add comment
@@ -913,29 +948,81 @@ async function showCardDetail(card) {
     }
   }
 
-  // Load children (subtasks)
+  // Load children (subtasks) — only top-level tasks have children (no subtask of subtask)
   try {
     const childRes = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/children`)
     const children = await childRes.json()
     const section = document.getElementById('cardChildrenSection')
     const list = document.getElementById('cardChildrenList')
-    if (children.length > 0) {
+    const addSubtaskSection = document.getElementById('cardAddSubtaskSection')
+    const isTask = !card.parent_id
+
+    // #113: Show add-subtask form only for top-level tasks that are not done
+    if (isTask && card.status !== 'done') {
+      addSubtaskSection.style.display = ''
+      const titleInput = document.getElementById('newSubtaskTitle')
+      titleInput.value = ''
+      document.getElementById('addSubtaskBtn').onclick = async () => {
+        const title = titleInput.value.trim()
+        if (!title) { titleInput.focus(); return }
+        try {
+          const r = await fetch('/api/kanban', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, parent_id: card.id, status: card.status, priority: card.priority, project: card.project || null, assignee: null }),
+          })
+          if (!r.ok) { showToast('Hiba az alfeladat létrehozásakor'); return }
+          showToast('Alfeladat létrehozva')
+          loadKanban()
+          showCardDetail(card)
+        } catch { showToast('Hiba az alfeladat létrehozásakor') }
+      }
+    } else {
+      addSubtaskSection.style.display = 'none'
+    }
+
+    const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész' }
+    if (children.length > 0 || isTask) {
       section.style.display = ''
       list.innerHTML = ''
-      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész' }
+      // #114: Delete button per subtask — only shown when the parent card is not done
+      const canDeleteChild = card.status !== 'done'
       for (const ch of children) {
         const div = document.createElement('div')
         div.className = 'comment-item'
-        div.style.cursor = 'pointer'
-        div.innerHTML = `<div><strong>${escapeHtml(ch.title)}</strong> <span style="color:var(--text-muted)">[${statusLabelsShort[ch.status] || ch.status}]</span></div>
-          <div style="font-size:0.85em; color:var(--text-muted)">${ch.assignee ? escapeHtml(ch.assignee) : ''} ${ch.description ? '-- ' + escapeHtml(ch.description).slice(0, 80) : ''}</div>`
-        div.onclick = () => { closeModal(cardDetailOverlay); showCardDetail(ch) }
+        div.style.cssText = 'cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:8px'
+        const info = document.createElement('div')
+        info.style.flex = '1'
+        info.innerHTML = `<div><strong>${escapeHtml(ch.title)}</strong> <span style="color:var(--text-muted)">[${statusLabelsShort[ch.status] || ch.status}]</span></div>
+          <div style="font-size:0.85em;color:var(--text-muted)">${ch.assignee ? escapeHtml(ch.assignee) : ''}${ch.description ? ' -- ' + escapeHtml(ch.description).slice(0, 80) : ''}</div>`
+        info.onclick = () => { closeModal(cardDetailOverlay); showCardDetail(ch) }
+        div.appendChild(info)
+        if (canDeleteChild) {
+          const delBtn = document.createElement('button')
+          delBtn.className = 'btn-danger btn-compact'
+          delBtn.style.flexShrink = '0'
+          delBtn.textContent = 'Törlés'
+          delBtn.onclick = async (e) => {
+            e.stopPropagation()
+            if (!confirm(`Biztosan törlöd az alfeladatot: "${ch.title}"?`)) return
+            try {
+              const r = await fetch(`/api/kanban/${encodeURIComponent(ch.id)}`, { method: 'DELETE' })
+              if (!r.ok) { showToast('Hiba a törlés során'); return }
+              showToast('Alfeladat törölve')
+              loadKanban()
+              showCardDetail(card)
+            } catch { showToast('Hiba a törlés során') }
+          }
+          div.appendChild(delBtn)
+        }
         list.appendChild(div)
       }
     } else {
       section.style.display = 'none'
     }
-  } catch { document.getElementById('cardChildrenSection').style.display = 'none' }
+  } catch {
+    document.getElementById('cardChildrenSection').style.display = 'none'
+    document.getElementById('cardAddSubtaskSection').style.display = 'none'
+  }
 
   // Breakdown button
   document.getElementById('cardBreakdownBtn').onclick = async () => {
