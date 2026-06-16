@@ -280,13 +280,13 @@ document.querySelectorAll('.kanban-add-btn').forEach((btn) => {
 
 async function loadKanban() {
   try {
-    // Ensure the card-aging config (window._marveen.kanbanAging) is loaded even
-    // if the user opens the Kanban page first, before the Agents page populated it.
-    if (!window._marveen?.kanbanAging) {
+    // Ensure the marveen config (kanbanAging + kanbanWip) is loaded even if the
+    // user opens the Kanban page first, before the Agents page populated it.
+    if (!window._marveen?.kanbanAging || !window._marveen?.kanbanWip) {
       try {
         const mr = await fetch('/api/marveen')
         if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
-      } catch { /* ignore -- aging just won't render until _marveen loads */ }
+      } catch { /* ignore -- aging/WIP just won't render until _marveen loads */ }
     }
     const [cardsRes, assigneesRes, projectsRes] = await Promise.all([
       fetch('/api/kanban'),
@@ -474,6 +474,49 @@ function renderKanban() {
 
   // Badge: only count subtasks that are in a different column (not embedded here)
   updateSubtaskBadges(embeddedSubtaskIds)
+
+  // WIP limit badges: update column-header count spans with "count/limit" when configured
+  updateWipBadges(grouped)
+}
+
+// Map column status keys to their count-span IDs
+const WIP_COUNT_IDS = {
+  planned: 'countPlanned',
+  in_progress: 'countInProgress',
+  waiting: 'countWaiting',
+  done: 'countDone',
+}
+
+function updateWipBadges(grouped) {
+  const cfg = window._marveen?.kanbanWip
+  for (const [status, cards] of Object.entries(grouped)) {
+    const el = document.getElementById(WIP_COUNT_IDS[status])
+    if (!el) continue
+    const limit = cfg?.limits?.[status] || 0
+    if (!limit) {
+      // No limit configured: restore plain count and clear WIP styling
+      el.textContent = cards.length
+      delete el.dataset.wip
+      el.style.color = ''
+      el.style.borderColor = ''
+      continue
+    }
+    const count = cards.length
+    el.textContent = `${count}/${limit}`
+    let state, color
+    if (count > limit) {
+      state = 'over'; color = cfg.overColor
+    } else if (count === limit) {
+      state = 'full'; color = cfg.fullColor
+    } else if ((count / limit) * 100 >= cfg.warnPct) {
+      state = 'warn'; color = cfg.warnColor
+    } else {
+      state = 'ok'; color = cfg.okColor
+    }
+    el.dataset.wip = state
+    el.style.color = color
+    el.style.borderColor = color
+  }
 }
 
 function updateSubtaskBadges(embeddedSubtaskIds) {

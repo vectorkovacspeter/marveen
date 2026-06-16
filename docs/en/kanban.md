@@ -102,6 +102,57 @@ KANBAN_AGING_CRITICAL_COLOR=#c53030
 ```
 
 Config flow: `src/config.ts` → `/api/marveen` (`kanbanAging` key) → `window._marveen.kanbanAging` (frontend). The frontend is static (`web/app.js`, no build step) — a server HUP is sufficient to pick up threshold changes.
+### Column WIP limits
+
+A WIP (Work In Progress) limit tells you when a column is overloaded -- meaning it has more active tasks than it's sensible to handle at once.
+
+**What you see in the column header**
+
+A round badge at the top of each column shows the current state, e.g. `4/5` (4 cards, limit is 5). The badge colour reflects how close you are to the limit:
+
+| Badge | What it means |
+|-------|--------------|
+| Grey | Plenty of room, all good |
+| Yellow | Approaching the limit -- worth keeping an eye on |
+| Orange | One away from the limit -- avoid adding new cards here |
+| Red, pulsing | Limit exceeded -- the column is overloaded, resolve something before adding more |
+
+**What to do**
+
+If a column is flashing a red badge, don't push new work into it. Close or move an existing card first. The limit doesn't block new cards -- it's a warning, not a lock.
+
+**How to configure the limit**
+
+WIP limits are set per column in the `.env` file (see the technical documentation for details). If no limit is configured for a column, the badge doesn't appear.
+
+### Column WIP limits -- technical details
+
+Each kanban column accepts an optional card-count ceiling. When set, the existing count badge in the column header switches to `count/limit` format and changes colour based on utilisation:
+
+| State | Condition | Appearance |
+|-------|-----------|------------|
+| ok | < `WARN_PCT`% | dark grey, no animation |
+| warn | >= `WARN_PCT`% (default 80%) | yellow |
+| full | exactly at limit (100%) | orange + mild pulse |
+| over | exceeds limit | red + stronger pulse + 10% scale |
+
+The badge is implemented by updating the existing `kanban-col-count` span -- no additional HTML element is added.
+
+**Configuration keys (`.env`):**
+
+```
+KANBAN_WIP_PLANNED=0        # 0 = unlimited
+KANBAN_WIP_IN_PROGRESS=0
+KANBAN_WIP_WAITING=0
+KANBAN_WIP_DONE=0
+KANBAN_WIP_WARN_PCT=80      # % threshold for yellow tier
+KANBAN_WIP_OK_COLOR=#6b7280
+KANBAN_WIP_WARN_COLOR=#c9a000
+KANBAN_WIP_FULL_COLOR=#d46b00
+KANBAN_WIP_OVER_COLOR=#c53030
+```
+
+Data flow: `src/config.ts` → `/api/marveen` (`kanbanWip` key) → `window._marveen.kanbanWip` (frontend). The frontend is static -- a server HUP is sufficient to apply limit changes.
 
 ---
 
