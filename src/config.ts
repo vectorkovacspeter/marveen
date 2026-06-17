@@ -93,6 +93,13 @@ export const KANBAN_AGING_WARN_COLOR = env['KANBAN_AGING_WARN_COLOR'] ?? '#c9a00
 export const KANBAN_AGING_CAUTION_COLOR = env['KANBAN_AGING_CAUTION_COLOR'] ?? '#d46b00'
 export const KANBAN_AGING_CRITICAL_COLOR = env['KANBAN_AGING_CRITICAL_COLOR'] ?? '#c53030'
 // Kanban WIP limits per column (0 = unlimited). Override via .env.
+// NOTE: these constants are frozen at process start (this module reads .env
+// once at import time). The dashboard's Settings page and the /api/marveen
+// kanbanWip payload do NOT read these directly anymore -- they resolve
+// through settings-store.ts (config-overrides.json > .env > registry
+// default) so a value saved in the UI takes effect without a restart. These
+// exports stay as the documented .env-only defaults / for any other code
+// that genuinely wants the boot-time value.
 export const KANBAN_WIP_PLANNED = parseInt(env['KANBAN_WIP_PLANNED'] ?? '0', 10)
 export const KANBAN_WIP_IN_PROGRESS = parseInt(env['KANBAN_WIP_IN_PROGRESS'] ?? '0', 10)
 export const KANBAN_WIP_WAITING = parseInt(env['KANBAN_WIP_WAITING'] ?? '0', 10)
@@ -116,6 +123,16 @@ export const KANBAN_SWIMLANE_DEFAULT_GROUP =
     ? rawKanbanSwimlaneDefaultGroup
     : 'none'
 export const KANBAN_SWIMLANE_SEPARATOR_COLOR = env['KANBAN_SWIMLANE_SEPARATOR_COLOR'] ?? ''
+
+// Kanban label colour palette (cold tones by default). The label CRUD UI
+// offers these as swatches instead of a free-text colour input, so every
+// label's colour traces back to this single configurable list rather than
+// a hardcoded per-label mapping in the frontend.
+const rawKanbanLabelColors = (env['KANBAN_LABEL_COLORS'] ?? '#3b82f6,#0ea5e9,#10b981,#14b8a6,#8b5cf6,#64748b')
+  .split(',')
+  .map((c) => c.trim())
+  .filter(Boolean)
+export const KANBAN_LABEL_COLORS = rawKanbanLabelColors.length > 0 ? rawKanbanLabelColors : ['#64748b']
 
 export const CHANNEL_PROVIDER: ChannelProviderType = getProviderType(env['CHANNEL_PROVIDER'])
 export const CHANNEL_TOKEN = getChannelToken(CHANNEL_PROVIDER, env)
