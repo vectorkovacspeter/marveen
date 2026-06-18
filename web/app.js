@@ -113,6 +113,7 @@ function switchPage(pageId) {
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'ideas') loadIdeasPage()
+  if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
 }
 
@@ -11212,6 +11213,221 @@ function downloadMarkdown(name, content) {
   btn.addEventListener('click', () => { render(); openModal(overlay) })
   if (closeBtn) closeBtn.addEventListener('click', () => closeModal(overlay))
   overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+})()
+
+// === Archivalt kartyak ===
+;(() => {
+  let archivedInit = false
+
+  const STATUS_LABELS = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész' }
+  const STATUS_COLORS = { planned: '#6b7280', in_progress: '#3b82f6', waiting: '#f59e0b', done: '#10b981' }
+  const PRIORITY_LABELS = { low: 'Alacsony', normal: 'Normál', high: 'Magas', urgent: 'Sürgős' }
+  const PRIORITY_COLORS = { low: '#9ca3af', normal: '#6b7280', high: '#f59e0b', urgent: '#ef4444' }
+
+  function fmtDate(unix) {
+    if (!unix) return ''
+    return new Date(unix * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
+  }
+
+  // Render an archived card with the same visual language as the live board:
+  // project pill + #seq title + colored rounded priority/label chips, wrapped in
+  // the .kanban-card frame. The whole card opens a read-only detail modal on
+  // click; the restore button stops propagation so it doesn't also open it.
+  function renderArchivedCard(card) {
+    const prioColor = PRIORITY_COLORS[card.priority] || '#6b7280'
+    const prioLabel = PRIORITY_LABELS[card.priority] || card.priority
+    const seqHtml = card.seq != null
+      ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--text-muted);margin-right:5px">#${card.seq}</span>`
+      : ''
+    const projectHtml = card.project
+      ? `<span class="kanban-card-project">${esc(card.project)}</span>`
+      : ''
+    let labelsHtml = ''
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      const pills = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsHtml = `<div class="kanban-card-labels">${pills}</div>`
+    }
+    const prioPill = `<span class="archived-prio-pill" style="--prio-color:${prioColor}">${prioLabel}</span>`
+    return `<div class="kanban-card archived-card" data-id="${esc(card.id)}" data-priority="${esc(card.priority)}">
+      ${projectHtml}
+      <div class="kanban-card-title">${seqHtml}${esc(card.title)}</div>
+      <div class="kanban-card-footer">${prioPill}</div>
+      ${labelsHtml}
+      <div class="archived-card-foot">
+        <span class="archived-date">Archiválva: ${fmtDate(card.archived_at)}</span>
+        <button class="btn-secondary btn-compact archived-restore-btn" data-id="${esc(card.id)}" title="Visszaállítás a táblára" style="white-space:nowrap;flex-shrink:0;">Visszaállítás</button>
+      </div>
+    </div>`
+  }
+
+  // Read-only detail modal for an archived card: meta grid, labels, description,
+  // comments -- no editing affordances. Restore button mirrors the card button.
+  async function showArchivedDetail(card) {
+    const seqPrefix = card.seq != null ? `#${card.seq} ` : ''
+    document.getElementById('archivedDetailTitle').textContent = `${seqPrefix}${card.title}`
+    const meta = document.getElementById('archivedDetailMeta')
+    const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
+    meta.innerHTML = `
+      <div class="meta-item"><span class="meta-label">Azonosító</span><span class="meta-value" style="font-family:monospace">${esc(idLabel)}</span></div>
+      <div class="meta-item"><span class="meta-label">Állapot</span><span class="meta-value">${STATUS_LABELS[card.status] || card.status}</span></div>
+      <div class="meta-item"><span class="meta-label">Felelős</span><span class="meta-value">${card.assignee ? esc(card.assignee) : '-- nincs --'}</span></div>
+      <div class="meta-item"><span class="meta-label">Prioritás</span><span class="meta-value">${PRIORITY_LABELS[card.priority] || card.priority}</span></div>
+      <div class="meta-item"><span class="meta-label">Projekt</span><span class="meta-value">${card.project ? esc(card.project) : '-- nincs --'}</span></div>
+      <div class="meta-item"><span class="meta-label">Archiválva</span><span class="meta-value">${fmtDate(card.archived_at)}</span></div>
+    `
+    const labelsWrap = document.getElementById('archivedDetailLabelsWrap')
+    const labelsBox = document.getElementById('archivedDetailLabels')
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      labelsBox.innerHTML = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsWrap.style.display = ''
+    } else {
+      labelsWrap.style.display = 'none'
+    }
+    document.getElementById('archivedDetailDesc').textContent = card.description || ''
+
+    const commentsWrap = document.getElementById('archivedDetailCommentsWrap')
+    const commentsBox = document.getElementById('archivedDetailComments')
+    commentsBox.innerHTML = ''
+    try {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`)
+      const comments = res.ok ? await res.json() : []
+      if (Array.isArray(comments) && comments.length > 0) {
+        for (const c of comments) {
+          const date = new Date(c.created_at * 1000).toLocaleString('hu-HU')
+          const div = document.createElement('div')
+          div.className = 'comment-item'
+          div.innerHTML = `<div><span class="comment-author">${esc(c.author)}</span><span class="comment-date">${date}</span></div><div class="comment-body">${esc(c.content)}</div>`
+          commentsBox.appendChild(div)
+        }
+        commentsWrap.style.display = ''
+      } else {
+        commentsWrap.style.display = 'none'
+      }
+    } catch { commentsWrap.style.display = 'none' }
+
+    const restoreBtn = document.getElementById('archivedDetailRestoreBtn')
+    restoreBtn.disabled = false
+    restoreBtn.textContent = 'Visszaállítás a táblára'
+    restoreBtn.onclick = async () => {
+      restoreBtn.disabled = true
+      restoreBtn.textContent = '...'
+      try {
+        const resp = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/unarchive`, { method: 'POST' })
+        if (resp.ok) {
+          closeModal(document.getElementById('archivedDetailOverlay'))
+          doArchivedSearch()
+        } else {
+          restoreBtn.disabled = false
+          restoreBtn.textContent = 'Visszaállítás a táblára'
+          showToast('Hiba a visszaállításnál.')
+        }
+      } catch {
+        restoreBtn.disabled = false
+        restoreBtn.textContent = 'Visszaállítás a táblára'
+      }
+    }
+    openModal(document.getElementById('archivedDetailOverlay'))
+  }
+
+  async function populateArchivedProjects() {
+    try {
+      const r = await fetch('/api/kanban-projects')
+      if (!r.ok) return
+      const projects = await r.json()
+      const sel = document.getElementById('archivedProject')
+      const cur = sel.value
+      sel.innerHTML = '<option value="">Minden projekt</option>'
+      for (const p of projects) {
+        const opt = document.createElement('option')
+        opt.value = p
+        opt.textContent = p
+        if (p === cur) opt.selected = true
+        sel.appendChild(opt)
+      }
+    } catch { /* best-effort */ }
+  }
+
+  async function doArchivedSearch() {
+    const list = document.getElementById('archivedList')
+    const summary = document.getElementById('archivedSummary')
+    list.className = ''
+    list.innerHTML = '<p class="naplo-empty">Betöltés...</p>'
+    summary.textContent = ''
+
+    const params = new URLSearchParams()
+    const q = document.getElementById('archivedQ').value.trim()
+    const project = document.getElementById('archivedProject').value
+    const from = document.getElementById('archivedFrom').value
+    const to = document.getElementById('archivedTo').value
+    if (q) params.set('q', q)
+    if (project) params.set('project', project)
+    if (from) params.set('from', Math.floor(new Date(from).getTime() / 1000))
+    if (to) params.set('to', Math.floor(new Date(to + 'T23:59:59').getTime() / 1000))
+
+    try {
+      const r = await fetch('/api/kanban/archived?' + params.toString())
+      if (!r.ok) { list.innerHTML = `<p class="naplo-empty error">Hiba: ${r.status}</p>`; return }
+      const data = await r.json()
+      const cards = data.cards || []
+      summary.textContent = `${cards.length} kártya (max ${data.limit})`
+      if (cards.length === 0) { list.innerHTML = '<p class="naplo-empty">Nincs archivált kártya.</p>'; return }
+      list.className = 'archived-grid'
+      list.innerHTML = cards.map(renderArchivedCard).join('')
+      const byId = new Map(cards.map(c => [c.id, c]))
+      // Whole card opens the read-only detail; restore button acts on its own.
+      list.querySelectorAll('.archived-card').forEach(el => {
+        el.addEventListener('click', () => {
+          const card = byId.get(el.dataset.id)
+          if (card) showArchivedDetail(card)
+        })
+      })
+      list.querySelectorAll('.archived-restore-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation()
+          const id = btn.dataset.id
+          btn.disabled = true
+          btn.textContent = '...'
+          try {
+            const resp = await fetch(`/api/kanban/${id}/unarchive`, { method: 'POST' })
+            if (resp.ok) {
+              const cardEl = btn.closest('.archived-card')
+              if (cardEl) cardEl.style.opacity = '0.4'
+              btn.textContent = 'Visszaállítva'
+            } else {
+              btn.disabled = false
+              btn.textContent = 'Visszaállítás'
+              showToast('Hiba a visszaállításnál.')
+            }
+          } catch {
+            btn.disabled = false
+            btn.textContent = 'Visszaállítás'
+          }
+        })
+      })
+    } catch (err) {
+      list.innerHTML = `<p class="naplo-empty error">Hálózati hiba: ${err.message}</p>`
+    }
+  }
+
+  function loadArchivedPage() {
+    if (!archivedInit) {
+      archivedInit = true
+      document.getElementById('archivedSearchBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedRefreshBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedQ').addEventListener('keydown', e => { if (e.key === 'Enter') doArchivedSearch() })
+      const adOverlay = document.getElementById('archivedDetailOverlay')
+      document.getElementById('archivedDetailClose').addEventListener('click', () => closeModal(adOverlay))
+      adOverlay.addEventListener('click', e => { if (e.target === adOverlay) closeModal(adOverlay) })
+    }
+    populateArchivedProjects()
+    doArchivedSearch()
+  }
+
+  window.loadArchivedPage = loadArchivedPage
 })()
 
 // === Naplo (Audit Timeline) ===
