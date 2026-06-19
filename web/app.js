@@ -2230,6 +2230,12 @@ function renderAgents() {
   if (window._marveen) {
     const m = window._marveen
     const displayName = m.name || 'Marveen'
+    // The model is no longer hardcoded: /api/marveen reports the configured
+    // model (readActiveModelFromProjectDir). Mirror the sub-agent card, which
+    // uses the model value as both the badge label and class. Fall back to
+    // 'opus' only before /api/marveen has resolved (or on a legacy backend).
+    const mainModelLabel = m.model || 'opus'
+    const mainModelClass = m.model || 'opus'
     const mCard = document.createElement('div')
     mCard.className = 'agent-card marveen-card'
     mCard.innerHTML = `
@@ -2241,7 +2247,7 @@ function renderAgents() {
         </div>
       </div>
       <div class="agent-card-footer">
-        <span class="agent-model-badge opus">opus</span>
+        <span class="agent-model-badge ${escapeHtml(mainModelClass)}">${escapeHtml(mainModelLabel)}</span>
         <span class="process-indicator" title="Fut: a fő asszisztens mindig a --channels session-ben fut. Ez a kártya fixen Fut állapotot mutat, nincs per-ágens tmux-ellenőrzés."><span class="process-dot running"></span>Fut</span>
         <span class="tg-status" title="Online: a fő asszisztens csatornáját a --channels session kezeli, ezért fixen online (nincs külön token-ellenőrzés)."><span class="tg-dot connected"></span>Online</span>
       </div>
@@ -8278,7 +8284,11 @@ async function loadMessagesPage() {
 }
 
 const CHAT_SYSTEM_AGENTS = new Set(['heartbeat','telegram-coordinator','channel-coordinator'])
-const CHAT_OWNER_AGENT = 'Szabolcs' // pinned to top; display label overridden
+// The owner's own message thread is pinned to the top and labelled "<name> (te)".
+// The owner display name comes from the backend (OWNER_NAME via /api/marveen ->
+// window._marveen.ownerName), not a hardcoded literal, so a renamed install
+// recognizes its real owner. Empty until _marveen resolves (no false match).
+function chatOwnerName() { return window._marveen?.ownerName || '' }
 
 function chatLastSeenKey(agentName) { return 'chat_last_seen_' + agentName }
 function chatGetLastSeen(agentName) { return parseInt(localStorage.getItem(chatLastSeenKey(agentName)) || '0', 10) }
@@ -8286,7 +8296,8 @@ function chatMarkSeen(agentName, maxId) {
   if (maxId > chatGetLastSeen(agentName)) localStorage.setItem(chatLastSeenKey(agentName), String(maxId))
 }
 function chatIsUnread(agentName, threadInfo) {
-  if (agentName !== CHAT_OWNER_AGENT) return false
+  const owner = chatOwnerName()
+  if (!owner || agentName !== owner) return false
   if (!threadInfo?.lastMsg) return false
   return threadInfo.lastMsg.id > chatGetLastSeen(agentName)
 }
@@ -8320,7 +8331,7 @@ async function loadChatAgentList() {
     for (const t of threads) {
       if (t.agent) threadIndex.set(t.agent, { lastMsg: t.lastMessage, count: t.count || 0 })
     }
-    // Also include thread agents not in fleet (e.g. Szabolcs/owner direct msgs)
+    // Also include thread agents not in fleet (e.g. the owner's own direct msgs)
     for (const t of threads) {
       if (t.agent && !fleetNames.includes(t.agent) && !CHAT_SYSTEM_AGENTS.has(t.agent)) {
         fleetNames.push(t.agent)
@@ -8328,9 +8339,10 @@ async function loadChatAgentList() {
     }
 
     // Sort: owner pinned first, then agents with messages by recency, rest alphabetical
+    const owner = chatOwnerName()
     const sorted = [...fleetNames].sort((a, b) => {
-      if (a === CHAT_OWNER_AGENT) return -1
-      if (b === CHAT_OWNER_AGENT) return 1
+      if (owner && a === owner) return -1
+      if (owner && b === owner) return 1
       const aHas = threadIndex.has(a), bHas = threadIndex.has(b)
       if (aHas && !bHas) return -1
       if (!aHas && bHas) return 1
@@ -8350,7 +8362,7 @@ async function loadChatAgentList() {
       const isSelected = name === chatSelectedAgent ? ' selected' : ''
       const dimmed = info ? '' : ' style="opacity:0.5"'
       const unread = chatIsUnread(name, info)
-      const displayName = name === CHAT_OWNER_AGENT ? 'Szabolcs (te)' : name
+      const displayName = owner && name === owner ? owner + ' (te)' : name
       return `<div class="chat-agent-item${isSelected}${unread ? ' unread' : ''}" data-agent="${escapeHtml(name)}"${dimmed}>
         <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
         <div class="chat-agent-info">
@@ -8393,7 +8405,8 @@ async function loadChatThread(agentName) {
   chatThreadState.hasMore = true
   chatThreadState.loading = false
 
-  const threadDisplayName = agentName === CHAT_OWNER_AGENT ? 'Szabolcs (te)' : agentName
+  const owner = chatOwnerName()
+  const threadDisplayName = owner && agentName === owner ? owner + ' (te)' : agentName
 
   panel.innerHTML = `
     <div class="chat-thread-header">
