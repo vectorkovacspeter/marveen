@@ -1,0 +1,7 @@
+{
+  "id": "applier",
+  "label": "Applier-pool (Supabase retained)",
+  "description": "Tech-lead / PM applier-pool (Samu + Marveen). Permissive like default but explicitly NO Supabase MCP deny -- these agents are the single applier-pool for prod Supabase (review+apply). Sub-devs and non-applier agents use the denied default/sub-dev profiles.",
+  "permissionMode": "permissive",
+  "filesystem": { "allow": [], "deny": [] }
+}
