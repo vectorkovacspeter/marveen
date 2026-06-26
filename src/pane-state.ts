@@ -842,6 +842,41 @@ export function parkedInputText(pane: string): string | null {
   return flat.length > 0 ? flat : null
 }
 
+// How many VISUAL rows the live input box content occupies, ignoring the
+// bare prompt glyph and blank padding. The caller uses this to choose the
+// right submit keystroke: a MULTI-row parked input must NOT be submitted with
+// a bare Enter, because in the Claude TUI a plain Enter on a wrapped /
+// multi-line buffer inserts a newline instead of submitting (see
+// agent-process.ts:833) -- a single-row buffer submits on Enter.
+//
+// Counts the non-empty rows of liveInputBox() after stripping the leading `❯`
+// prompt marker; an empty box (`❯ ` only) or no box at all -> 0. Pure: no
+// tmux, only the captured text.
+export function parkedInputRowCount(pane: string): number {
+  const box = liveInputBox(pane)
+  if (box == null) return 0
+  return box
+    .split('\n')
+    .map((row) => row.replace(/^\s*❯/, '').trim())
+    .filter((row) => row.length > 0).length
+}
+
+// Post-submit verification: did the parked input actually leave the box?
+//
+// `prevSig` is stuckInputSignature(pane) captured BEFORE the submit attempt
+// (the exact text that was parked). `paneAfter` is a fresh capture taken
+// AFTER the submit. Returns true when the submit LANDED -- the same parked
+// signature is no longer 'typing' in the box: it cleared (pane went idle),
+// the agent started processing it (pane went busy), or different text is now
+// parked. Returns false when the IDENTICAL signature is still parked (the
+// Enter was swallowed -> the caller should retry / escalate), or when
+// paneAfter is null (no capture -> cannot confirm, treat as not-landed).
+// Pure: builds on stuckInputSignature() (which gates on detectPaneState).
+export function submitLanded(prevSig: string, paneAfter: string | null): boolean {
+  if (paneAfter == null) return false
+  return stuckInputSignature(paneAfter) !== prevSig
+}
+
 // Per-session bookkeeping for the stuck-input recovery watcher. A "spell"
 // is one continuous stretch of the SAME text parked in the input box.
 export interface StuckInputState {
