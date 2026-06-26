@@ -145,6 +145,22 @@ export function decideStuckInputRestart(
   return 'restart'
 }
 
+// Busy-guard over the stuck-input restart decision (false-positive fix,
+// 2026-06-26). A parked <channel> block while the main agent is ACTIVELY
+// generating is NOT a wedge -- the TUI just can't submit inbound text mid-turn,
+// and it lands the moment the turn ends. Before this guard, #452's escalation
+// hard-restarted the main session every ~5min during normal long-running work,
+// destroying the live conversation. A genuine heartbeat-wedge reads idle/unknown
+// (not generating) with text parked, so it still escalates; the keepalive-
+// staleness watchdog backstops the rare truly-wedged-but-shows-busy case.
+// Reuses shouldDeferKeepaliveRespawn (single source of truth for "pane is busy").
+export function applyStuckRestartBusyGuard(
+  paneState: PaneState | null,
+  decision: 'restart' | 'alert' | 'skip',
+): 'restart' | 'alert' | 'skip' {
+  return shouldDeferKeepaliveRespawn(paneState) ? 'skip' : decision
+}
+
 // Session-agnostic stuck-input recovery: capture the pane, and if a channel
 // notification is parked at the ❯ prompt, get it SUBMITTED (Enter-first, then
 // clear + verbatim re-inject of the COMPLETE block). The gate fires ONLY for a
@@ -636,15 +652,25 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // A cleared input box ends the spell -> reset the escalation counter so the
   // next genuine wedge starts fresh (and a successful restart is not penalised).
   if (!parked) { stuckRestartCount = 0; return }
-  const action = decideStuckInputRestart(
+  // Busy-guard: never hard-restart while the main pane is actively generating --
+  // a parked <channel> block then is a busy session, not a wedge. See
+  // applyStuckRestartBusyGuard. detectPaneState reads 'unknown' for an
+  // unreadable pane and the guard fails-open on that, so a broken capture never
+  // blocks a genuine recovery.
+  const paneContent = capturePane(MAIN_CHANNELS_SESSION)
+  const paneState = paneContent != null ? detectPaneState(paneContent) : null
+  const action = applyStuckRestartBusyGuard(paneState, decideStuckInputRestart(
     parked, state.attempts, MAIN_STUCK_THRESHOLDS.maxAttempts,
     Date.now(), lastStuckRestartAt, stuckRestartCount,
     STUCK_RESTART_MIN_INTERVAL_MS, STUCK_RESTART_MAX_CONSECUTIVE,
-  )
+  ))
+  if (action === 'skip' && shouldDeferKeepaliveRespawn(paneState)) {
+    logger.info({ paneState, attempts: state.attempts }, 'Stuck-input restart deferred -- main pane is busy (working, not wedged)')
+  }
   if (action === 'skip') return
   if (action === 'alert') {
     logger.error({ session: MAIN_CHANNELS_SESSION }, 'Stuck main channel input survived max restart escalations -- manual intervention needed')
-    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt es ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabaditotta ki. Kezi beavatkozas kell (pl. systemctl --user restart ${SERVICE_ID}-channels).`)
+    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt es ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabaditotta ki. Kezi beavatkozas kell: inditsd ujra a ${SERVICE_ID}-channels szolgaltatast.`)
     stuckRestartCount++ // tick past the cap so the alert fires only once
     return
   }
