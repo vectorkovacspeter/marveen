@@ -426,9 +426,19 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     const mcpEnv = hasChannel
       ? 'export MCP_SERVER_CONNECTION_BATCH_SIZE=10 && export MCP_CONNECTION_NONBLOCKING=1 && export MCP_TIMEOUT=60000 && '
       : ''
+    // Disable Claude Code's history-based prompt suggestions -- the DIM (ANSI
+    // SGR-2 faint) ghost-text of a previous prompt that Claude shows in an empty
+    // input box. The stuck-input recovery scrapes the pane with `capture-pane -p`
+    // (no colour), so it cannot tell a dim ghost suggestion apart from REAL
+    // parked input and re-submits the suggestion as a command. That is the root
+    // of the 2026-06-26 phantom-injection incident: a stale "Sztornózd" ghost was
+    // re-submitted and cancelled a live invoice; an earlier ghost emailed a family
+    // member. Killing the suggestion at the source removes the ghost the recovery
+    // misreads. Env var verified present in claude.exe (CLAUDE_CODE_ENABLE_*).
+    const promptSuggestionEnv = 'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false && '
     // Single-quote `${model}` so values like `claude-opus-4-8[1m]` (1M-context
     // suffix) are not glob-expanded by the shell that tmux spawns the command in.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
     runTmux(null, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')
