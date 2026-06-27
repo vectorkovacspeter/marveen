@@ -1134,6 +1134,11 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$NODE_PATH $INSTALL_DIR/dist/index.js
 Restart=on-failure
 RestartSec=5
+# Raise the file-descriptor limit: the dashboard makes many tmux subprocess
+# calls + holds MCP/SSE connections; the default soft limit (often 1024, or 256
+# under launchd on macOS) is exhausted once enough agents are active -> EMFILE,
+# silent HTTP-listener flap + "can't find session" tmux failures (2026-06-27).
+LimitNOFILE=16384
 StandardOutput=append:$INSTALL_DIR/store/dashboard.log
 StandardError=append:$INSTALL_DIR/store/dashboard.error.log
 Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
