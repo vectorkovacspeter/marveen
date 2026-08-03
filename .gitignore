@@ -92,3 +92,7 @@ __pycache__/
 # Claude Code Channels runtime config/session dir (sessions, history, tokens,
 # plugins, skills). Per-install runtime state -- never source, never commit.
 .channels-config/
+
+# Superpowers planning docs (brainstorm specs/plans). Private working notes --
+# never committed, never pushed.
+docs/superpowers/
