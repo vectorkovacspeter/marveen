@@ -10,7 +10,15 @@ __pycache__/
 .env
 # Docker runtime env may hold tokens -- keep only the tracked .example.
 .env.docker
-store/
+# store/ holds runtime data (DB, tokens, state JSON) -- ignored -- EXCEPT the
+# tracked operational scripts (code, not data). A directory-exclude ("store/")
+# would block these negations, so ignore the CONTENTS ("store/*") instead.
+store/*
+!store/*.sh
+!store/cybersec-gate-scan.py
+!store/local-llm-model
+!store/local-llm-skills/
+!store/local-llm-skills/*.txt
 workspace/
 agents/
 reports/
