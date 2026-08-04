@@ -316,7 +316,10 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: NEW_DEV_STOP_MESSAGE }, 409)
       return true
     }
-    if (updateKanbanCard(id, data, { actor: typeof actor === 'string' ? actor : undefined, force: force === true })) {
+    // Did force actually override an ACTIVE newDevStop block? (computed with force=false: "would the
+    // guard have applied without the override") -- passed to db.ts so only a real bypass is audited.
+    const putBypassedGuard = force === true && newDevStopWouldBlock(id, data.status, false, typeof actor === 'string' ? actor : undefined)
+    if (updateKanbanCard(id, data, { actor: typeof actor === 'string' ? actor : undefined, force: force === true, bypassedRouteGuard: putBypassedGuard })) {
       json(res, { ok: true }); return true
     }
     // Card c4f2de32: distinguish "no such card" from "refused to re-open reviewed work", so the
@@ -349,7 +352,10 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: NEW_DEV_STOP_MESSAGE }, 409)
       return true
     }
-    if (moveKanbanCard(id, status, sort_order ?? 0, actor, force === true)) {
+    // Did force actually override an ACTIVE newDevStop block? (computed with force=false) -- passed to
+    // db.ts so the audit marks a real bypass, not the mere presence of the force flag.
+    const moveBypassedGuard = force === true && newDevStopWouldBlock(id, status, false, typeof actor === 'string' ? actor : undefined)
+    if (moveKanbanCard(id, status, sort_order ?? 0, actor, force === true, moveBypassedGuard)) {
       // Wake the assigned agent once when the card enters in_progress.
       if (status === 'in_progress') fireKanbanDispatch(id, actor)
       json(res, { ok: true })

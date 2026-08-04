@@ -198,15 +198,26 @@ describe('a forced re-open is marked as such', () => {
     expect(last?.forced).toBe(1)
   })
 
-  // KNOWN INHERITED BUG (from the mikrob source; mikrob's own repo fails this case identically): the
-  // `forced` audit flag is over-set — an ordinary forced move to in_progress with no actual block is
-  // marked forced=1 by db.ts's move/update force clauses. Skipped pending a fix that distinguishes
-  // "force bypassed a real block" from "force passed but nothing was blocked" without regressing the
-  // 21 real-override cases in this file. TODO(p2-followup): fix the forced bookkeeping and re-enable.
-  it.skip('an ordinary move carrying force is NOT marked (force is not an override of anything)', () => {
+  // `forced` marks a transition that force OVERRODE A GUARD, not merely one that carried force. The
+  // reviewed-card-reopen guard lives in db.ts (so a move/update sees it directly); the newDevStop
+  // threshold guard lives at the route layer, so the route tells db.ts whether force actually bypassed
+  // it via `bypassedRouteGuard`. A plain planned->in_progress force with no active guard overrode
+  // nothing -> forced=0. (Fixes the over-set the mikrob source shipped, where any planned->in_progress
+  // force was marked forced=1 regardless of whether a guard was in play.)
+  it('an ordinary move carrying force is NOT marked (force did not override any guard)', () => {
     createKanbanCard({ id: 'card-5', title: 'Plain', assignee: 'backend' })
     expect(moveKanbanCard('card-5', 'in_progress', 0, 'mainagent', true)).toBe(true)
     expect(getKanbanCardEvents('card-5').at(-1)?.forced).toBe(0)
+  })
+
+  it('records forced=1 when force bypassed a route-layer guard (newDevStop), as the route signals', () => {
+    // The route computes whether newDevStop would have blocked this planned start without force, and
+    // passes that as bypassedRouteGuard. A real exempt-agent override during an active newDevStop is a
+    // deliberate bypass -- it must stay audited (investigation 2026-08-02: an unmarked bypass reads as
+    // an unguarded gap).
+    createKanbanCard({ id: 'card-6', title: 'NewDev start', assignee: 'backend' })
+    expect(moveKanbanCard('card-6', 'in_progress', 0, 'mainagent', true, true)).toBe(true)
+    expect(getKanbanCardEvents('card-6').at(-1)?.forced).toBe(1)
   })
 })
 

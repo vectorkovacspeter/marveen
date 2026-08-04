@@ -1849,19 +1849,19 @@ export function reviewedCardBlocksInProgress(id: string, nextStatus: string): bo
 export function updateKanbanCard(
   id: string,
   fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>,
-  opts?: { actor?: string; force?: boolean }
+  opts?: { actor?: string; force?: boolean; bypassedRouteGuard?: boolean }
 ): boolean {
   const card = getKanbanCard(id)
   if (!card) return false
   const statusChanges = fields.status !== undefined && fields.status !== card.status
   const blocked = statusChanges && reviewedCardBlocksInProgress(id, fields.status as string)
   if (blocked && !opts?.force) return false
-  // Record forced=1 whenever a force override was actually exercised on this transition -- either
-  // the reviewed-card-reopen guard (`blocked`) or the newDevStop threshold guard at the route layer
-  // (`opts.force` on a planned->in_progress move). Previously only `blocked` was recorded, so a
-  // newDevStop force:true bypass showed as forced=0 in the audit trail, indistinguishable from an
-  // unguarded gap (investigation 2026-08-02, cards 8c4a6d9c/cf068369/89fba8e4).
-  const forcedFlag = (blocked || (statusChanges && fields.status === 'in_progress' && opts?.force)) ? 1 : 0
+  // Record forced=1 only when force actually OVERRODE A GUARD on this transition -- either the
+  // reviewed-card-reopen guard (`blocked`, visible here) or the newDevStop threshold guard at the
+  // route layer (`opts.bypassedRouteGuard`, which the route sets true only when force bypassed an
+  // ACTIVE block). A plain force that overrode nothing is not an override (audit accuracy: mark real
+  // bypasses, not the mere presence of the flag -- investigation 2026-08-02, cards 8c4a6d9c/cf068369).
+  const forcedFlag = (blocked || opts?.bypassedRouteGuard) ? 1 : 0
   const now = Math.floor(Date.now() / 1000)
   const f = { ...card, ...fields, updated_at: now }
   const changed = db.prepare(
@@ -1880,7 +1880,7 @@ export function getChildCards(parentId: string): KanbanCard[] {
   return db.prepare('SELECT * FROM kanban_cards WHERE parent_id = ? AND archived_at IS NULL ORDER BY sort_order ASC').all(parentId) as KanbanCard[]
 }
 
-export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number, actor?: string, force?: boolean): boolean {
+export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number, actor?: string, force?: boolean, bypassedRouteGuard?: boolean): boolean {
   const now = Math.floor(Date.now() / 1000)
   // Card c4f2de32: a card waiting on an unanswered REVIEW is finished work, not stalled work --
   // pulling it back to in_progress is what made other agents rebuild it. A gate FAIL leaves a
@@ -1894,13 +1894,14 @@ export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrd
     'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
   ).run(status, sortOrder, now, id).changes > 0
   if (changed && prev !== undefined && prev !== status) {
-    // `forced` records whether THIS call used a force override of ANY guard (reviewed-card-reopen
-    // OR the newDevStop threshold at the route layer) -- previously only forcedOverride (the
-    // reviewed-card guard) was recorded, so a newDevStop force:true bypass showed as forced=0 in
-    // the audit trail, indistinguishable from a real guard gap (investigation 2026-08-02).
+    // `forced` records whether THIS call OVERRODE A GUARD -- the reviewed-card-reopen guard
+    // (`forcedOverride`, visible here) OR the newDevStop threshold guard at the route layer
+    // (`bypassedRouteGuard`, which the route sets true only when force bypassed an ACTIVE block).
+    // A plain force that overrode nothing is not marked -- audit accuracy over flag-presence
+    // (investigation 2026-08-02: an unmarked real bypass read as an unguarded gap).
     db.prepare(
       'INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at, forced) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(id, prev, status, actor ?? null, now, (forcedOverride || force) ? 1 : 0)
+    ).run(id, prev, status, actor ?? null, now, (forcedOverride || bypassedRouteGuard) ? 1 : 0)
   }
   return changed
 }
