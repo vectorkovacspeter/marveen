@@ -69,13 +69,16 @@ describe('layer 1 -- the model-id allowlist', () => {
 describe('the writer chokepoint refuses a bad id before touching disk', () => {
   it('writeAgentModel THROWS InvalidModelIdError on an injection payload', () => {
     // The guard is the first statement, before any fs access, so no agent-config.json is written.
-    // Every route writer (create + PATCH) goes through this, so none can persist an unsafe value.
+    // Every ROUTE writer (create + PATCH) goes through this chokepoint. It is NOT the only writer of a
+    // persisted model, though: fleet-transfer imports a main/agent package and writes settings.json /
+    // agent-config.json straight from it without re-validating the model (tracked separately). There the
+    // sink-side escape -- not this validator -- is the backstop.
     expect(() => writeAgentModel('nonexistent-agent', "x'; id; echo '")).toThrow(InvalidModelIdError)
     expect(() => writeAgentModel('nonexistent-agent', 'a $(id)')).toThrow(InvalidModelIdError)
   })
 
-  // Card 6610edff (Cybered 7139): writeMainModel is the MAIN-agent sibling of writeAgentModel and the
-  // one persisted-model writer that used to skip the allowlist. It is a private, IO-side-effecting fn
+  // Card 6610edff (Cybered 7139): writeMainModel is the MAIN-agent sibling of writeAgentModel and a
+  // persisted-model writer that skipped the allowlist. It is a private, IO-side-effecting fn
   // in the heavy model-fallback-runner module (never imported by a test), so we pin the guard at the
   // source: it must call isValidModelId(model) and BEFORE it ever writes .claude/settings.json.
   it('writeMainModel validates the id BEFORE the write chokepoint', () => {
