@@ -15,6 +15,20 @@
 
 Marveen egy AI asszisztens keretrendszer, ami Claude Code-ra épül. Saját AI csapatot építhetsz, akik Telegramon vagy Slacken kommunikálnak veled, önállóan dolgoznak, és egymással is együttműködnek.
 
+## Erről a változatról (fork)
+
+Ez a repó a [`vectorkovacspeter/marveen`](https://github.com/vectorkovacspeter/marveen) — az eredeti [`Szotasz/marveen`](https://github.com/Szotasz/marveen) **forkja**. Két projekt munkájára épül:
+
+- **[`Szotasz/marveen`](https://github.com/Szotasz/marveen)** *(upstream)* — a termék alapja: a teljes keretrendszer, minden funkció és dokumentáció. Ez a változat naprakészen követi.
+- **[`R4CK/mikrob`](https://github.com/R4CK/mikrob)** *(fork)* — ebből emeltük át **válogatva** a nem-személyes, éles-minőségű **biztonsági hardeninget** (a gép- és személy-specifikus részek — hardcode-olt útvonalak, saját ágens-flotta — nélkül).
+
+Ehhez a változathoz eddig hozzáadva:
+
+- **Biztonsági hardening** (mikrob-ból portolva, kódevidenciával tesztelve): modell-ID command-injection lezárása (allowlist + POSIX shell-escape **mind a 4** ágens-indítási ponton), egress-gate URL-userinfo bypass javítás, valamint `git-protect` / `secret-write` / `big-file` guard hookok.
+- **Docker környezet** — többlépcsős build + Compose (lásd a [Docker](#docker-konténer) szakaszt és a [docs/docker.md](docs/docker.md)-t).
+
+> A rendszer eredeti szerzője **Szota Szabolcs**; ez a fork az ő munkájára épít, és nem személyes javításokat emel át a mikrob forkból. A teljes forrás-attribúció az [ATTRIBUTIONS.md](./ATTRIBUTIONS.md)-ben.
+
 ## Funkciók
 
 - **AI Csapat**: Több ágens, mindegyik saját csatornával (Telegram vagy Slack), személyiséggel és memóriával
@@ -138,6 +152,30 @@ SERVICE_ID=acmeai           # OS szolgáltatás-azonosító (a BRAND_NAME ASCII 
 ```
 
 A `MAIN_AGENT_ID` és `SERVICE_ID` értékeket a telepítő automatikusan származtatja; ritkán kell kézzel szerkeszteni. Ha a `BRAND_NAME` megegyezik a `BOT_NAME`-mel (a default), a `SERVICE_ID` megegyezik a `MAIN_AGENT_ID`-vel, így a launchd/systemd unit-nevek byte-azonosak a márkázatlan telepítéssel: a helyben történő frissítés nem törik el.
+
+### Docker (konténer)
+
+Natív telepítés helyett a rendszer konténerben is futtatható — a szükséges eszközökkel (Node 22, `tmux`, `git`, `python3`, `ffmpeg`, `sqlite3`, `claude` CLI) együtt, egy kicsi Debian alapon. Az állapot (SQLite adatbázis, tokenek, ügynök-munkakönyvtárak) **mountolt kötetekben** marad meg, a konfiguráció pedig egy külön `.env.docker` fájlból jön.
+
+```bash
+cp .env.docker.example .env.docker     # töltsd ki: WEB_PORT + EGY Claude-hitelesítés (OAuth token vagy API kulcs)
+docker compose up -d --build           # többlépcsős build + indítás a háttérben
+docker compose logs -f marveen         # log követése
+docker compose ps                      # állapot (a healthcheck "healthy"-t mutat, ha fut)
+# Dashboard: http://localhost:3420  (vagy a WEB_PORT-od)
+docker compose down                    # leállítás — a kötetek/adatok MEGMARADNAK (down -v törli is)
+```
+
+Csak image-építés, illetve a teszt-suite futtatása a **támogatott platformon** (Linux, Node 22 — itt a Windowson környezeti okból elhasaló tesztek is lefutnak):
+
+```bash
+docker build -t marveen:local .
+docker build --target test -t marveen:test . && docker run --rm marveen:test
+```
+
+Opcionális local-LLM offload (Ollama sidecar): `docker compose --profile ollama up -d`.
+
+→ **Részletek:** [docs/docker.md](docs/docker.md)
 
 ## Használat
 
@@ -288,8 +326,8 @@ A token 1 évig érvényes. Ne állíts be `ANTHROPIC_API_KEY`-t mellé.
 
 ## Követelmények
 
-- macOS, Linux, vagy Windows 10/11 (WSL-lel)
-- Node.js 20+
+- macOS, Linux, vagy Windows 10/11 (WSL-lel) — **vagy** Docker + Docker Compose (a natív telepítés helyett, ld. a [Docker](#docker-konténer) szakaszt)
+- Node.js 20–23 (a projekt `engines` mezője: `>=20 <24`; a Docker image Node 22 LTS-t rögzít)
 - Claude Code CLI (Claude Max/Pro előfizetés szükséges)
 - Telegram fiók vagy Slack workspace
 
@@ -308,6 +346,8 @@ Ha hasznos számodra a Marveen, támogasd a fejlesztést:
 [![Támogatás](https://img.shields.io/badge/Támogatás-Donably-orange)](https://www.donably.com/ai-a-mindennapokban-szabolccsal)
 
 ## Köszönet
+
+Ez a változat két repóra épül: az upstream **[`Szotasz/marveen`](https://github.com/Szotasz/marveen)** (a termék alapja) és az **[`R4CK/mikrob`](https://github.com/R4CK/mikrob)** fork (ebből származik az átemelt biztonsági hardening). Köszönet mindkét projekt szerzőinek.
 
 A Marveen több külső projektre és koncepcióra épít. A teljes felsorolás (forrás, szerző, licensz, hogyan használjuk) az [ATTRIBUTIONS.md](./ATTRIBUTIONS.md) fájlban található. Köszönet a Perplexity AI-nek (Bumblebee), Artem Zhutovnak (handoff / retrospective / skill-management skill suite), Mike Van Hornnak (printing-press), Andrej Karpathynak (CLAUDE.md pattern), és Matt Pococknak (handoff design tippek) a munkájukért.
 
