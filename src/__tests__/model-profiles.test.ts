@@ -57,6 +57,22 @@ describe('model profile map validation', () => {
     expect(state.ok).toBe(false);
   });
 
+  it('rejects a profile whose model id is malformed (command-injection defence, card b7fa5281)', () => {
+    // A profile value becomes a persisted/launched model id. Even though the launch sinks now escape,
+    // reject a syntactically invalid id at the map boundary too (defence in depth): a shell-metachar
+    // value must never reach the resolver as a "valid" profile.
+    const state = validateModelProfileMap({
+      profiles: {
+        premium_reasoning: "x'; id; echo '",
+        build_strong: 'claude-sonnet-5',
+        analysis_efficient: 'deepseek-v4-pro',
+        routine_lowcost: 'deepseek-v4-pro',
+      },
+    });
+    expect(state.ok).toBe(false);
+    if (!state.ok) expect(state.error).toContain('premium_reasoning');
+  });
+
   it('rejects an unknown profile id in the map', () => {
     const state = validateModelProfileMap({
       profiles: {

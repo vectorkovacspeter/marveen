@@ -14,6 +14,8 @@
 //
 // Pure logic: no fs, no env, no I/O. The runner reads the map.
 
+import { isValidModelId } from './model-id.js';
+
 export const MODEL_PROFILE_IDS = [
   'premium_reasoning',
   'build_strong',
@@ -53,6 +55,12 @@ export function validateModelProfileMap(raw: unknown): ModelProfileMapState {
     const value = src[id];
     if (typeof value !== 'string' || !value.trim()) {
       return { ok: false, error: `profile_map_missing_or_empty:${id}` };
+    }
+    // Defence in depth (card b7fa5281): a profile value becomes a persisted/launched model id, so a
+    // syntactically invalid one (shell metacharacters, over-length) must not pass as a "valid" profile
+    // even though the launch sinks now escape it.
+    if (!isValidModelId(value.trim())) {
+      return { ok: false, error: `profile_map_invalid_model_id:${id}` };
     }
     profiles[id] = value.trim();
   }
