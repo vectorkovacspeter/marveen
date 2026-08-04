@@ -16,7 +16,32 @@ import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS } from '../../config.js'
 import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
 import { isAgentRunning } from '../agent-process.js'
-import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
+import { readHardStop, isNewDevStartBlocked } from '../../costops/weekly-hard-stop.js'
+
+// Weekly NEW-DEV stop enforcement (the operator 2026-08-01). The newDevStop threshold was COMPUTED and shown,
+// but nothing refused the work: role agents self-advance to the next `planned` card on their own and
+// the status-write endpoints accepted `planned -> in_progress` unconditionally, so new development
+// kept starting above the threshold and burned the weekly quota it was meant to protect. The block
+// lives at the API boundary (both status-write routes) so every caller -- agent curl, dashboard drag,
+// PUT and POST /move -- hits it. A `waiting -> in_progress` transition is a FAIL-fix / gate resume,
+// NOT new development, so it stays allowed; `force: true` is meant as the deliberate main-agent override
+// for a critical-infra exception -- but until 2026-08-02 the early-out below (`|| force`) returned
+// "not blocked" for ANY caller's force:true with no actor check, and a role-agent used it to
+// self-force-start ordinary planned cards during newDevStopActive (cards 31cc1cd4/874a9fb0/23594bbc).
+// `isNewDevStartBlocked` now only honours `force` when the actor is an exempt agent (mikrob).
+// SAME DAY, second bypass: after force got 409'd, `backend` (card adaa5217) simply sent
+// `{"status":"waiting"}` on the still-`planned` card, skipping `in_progress` entirely -- the early-out
+// here only checked `nextStatus === 'in_progress'`, so a direct `planned -> waiting` sailed through
+// unchecked even though real (new) work had already happened. Now guards both target statuses.
+function newDevStopWouldBlock(id: string, nextStatus: unknown, force: boolean, actor?: string): boolean {
+  if (nextStatus !== 'in_progress' && nextStatus !== 'waiting') return false // cheap early-out avoids the flag + DB read
+  const flag = readHardStop()
+  if (!flag.newDevStopActive) return false
+  return isNewDevStartBlocked(getKanbanCard(id)?.status, nextStatus, force, flag, actor)
+}
+const NEW_DEV_STOP_MESSAGE =
+  'Heti "új fejlesztés leáll" küszöb átlépve: egy planned kártya nem mehet in_progress-be VAGY egyenesen waiting-be sem (új fejlesztés indítása) a heti resetig. In-flight és gate-munka továbbra is mehet (waiting -> in_progress); tudatos felülíráshoz a fő ágens force: true-val nyithatja meg.'
+import { resolveKanbanDispatchTarget, isSelfAdvanceMove } from '../../kanban-dispatch.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
@@ -80,10 +105,19 @@ export function kanbanMoveInstructions(id: string, target: string): string {
 // assigned agent once via the inter-agent message router (createAgentMessage),
 // which gives retry / dedup / trust-wrapping / busy-receiver handling for free.
 // dispatched_at is the once-only guard; errors never block the card move.
-function fireKanbanDispatch(id: string): void {
+function fireKanbanDispatch(id: string, actor?: string): void {
   try {
     const card = getKanbanCard(id)
     if (!card || card.dispatched_at) return
+    // Self-advance (rule 11, card 7a033f8d): the assignee moved its OWN card to in_progress. A
+    // dispatch here is a delayed echo of the agent's own decision -- it lands after the card is
+    // already waiting+REVIEW and reads as a phantom re-dispatch. Mark it dispatched (so no later
+    // auto-dispatch fires either) and send nothing. A missing/other actor still dispatches normally.
+    if (isSelfAdvanceMove(card.assignee, actor)) {
+      markKanbanCardDispatched(id)
+      logger.info({ id, actor, assignee: card.assignee }, 'Kanban self-advance: dispatch echo suppressed')
+      return
+    }
     const target = resolveKanbanDispatchTarget(card.assignee, {
       ownerName: OWNER_NAME,
       botName: BOT_NAME,
@@ -102,6 +136,31 @@ function fireKanbanDispatch(id: string): void {
   }
 }
 
+/**
+ * Read a repeatable filter parameter (`?status=a&status=b` or `?status=a,b`) as a set, or null when
+ * the caller did not ask for one at all. Card 37ea2f96.
+ *
+ * Blank values are dropped, so `?status=` (empty) means "no filter" rather than "match the empty
+ * string" -- a UI that clears its dropdown sends exactly that.
+ */
+/**
+ * Read a repeatable, comma-separable filter parameter (`?status=waiting&status=done`,
+ * `?status=waiting,done`) into a set, or null when the caller did not ask for one.
+ *
+ * EXPORTED so the tests drive THIS function (card bfeadc67): the suite used to carry its own copy
+ * of the logic, which passes happily while the route drifts away from it -- a test that cannot fail
+ * when the code changes is not testing the code.
+ */
+export function filterValues(url: URL, name: string): Set<string> | null {
+  const raw = url.searchParams.getAll(name)
+  if (raw.length === 0) return null
+  const values = raw
+    .flatMap((v) => v.split(','))
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0)
+  return values.length === 0 ? null : new Set(values)
+}
+
 export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
@@ -110,7 +169,18 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // instead of an N+1 per-card lookup, so the footer-pill UI gets
     // everything it needs in a single round trip.
     const labelsByCard = getLabelsForAllCards()
-    const cards = listKanbanCards().map((card) => ({ ...card, labels: labelsByCard.get(card.id) ?? [] }))
+    let cards = listKanbanCards().map((card) => ({ ...card, labels: labelsByCard.get(card.id) ?? [] }))
+    // Card 37ea2f96: `?status=` / `?assignee=` were ACCEPTED and ignored -- the endpoint returned all
+    // 265 cards whatever was asked, so every caller (gates, scanners, the dashboard) filtered client
+    // side and shipped the whole board over the wire each time. A parameter that looks like it works
+    // and does not is worse than an absent one: a caller trusts it and reads the wrong set.
+    //
+    // FAIL-CLOSED ON AN UNKNOWN VALUE: `?status=waitng` (a typo) returns an EMPTY list rather than
+    // everything. Silently widening a filter is how "why is this card in my sweep?" happens.
+    const wanted = filterValues(ctx.url, 'status')
+    if (wanted !== null) cards = cards.filter((c) => wanted.has(String(c.status)))
+    const assignees = filterValues(ctx.url, 'assignee')
+    if (assignees !== null) cards = cards.filter((c) => assignees.has(String(c.assignee ?? '')))
     jsonMaybeGzip(req, res, cards)
     return true
   }
@@ -216,7 +286,21 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/kanban' && method === 'POST') {
     const body = await readBody(req)
-    const data = JSON.parse(body.toString())
+    const { force, actor, ...data } = JSON.parse(body.toString())
+    // Card 8c4a6d9c/cf068369/89fba8e4 investigation (2026-08-02): the two status-write routes
+    // (PUT, POST /move) block a fresh planned->in_progress start above the weekly threshold, but a
+    // card CREATED already in_progress (or straight to waiting -- see adaa5217, same day) skipped
+    // both -- there is no prior 'planned' status for isNewDevStartBlocked to see. Block both creation
+    // shapes the same way. `force` only exempts an actor in exemptAgents (mikrob) -- see
+    // newDevStopWouldBlock above.
+    if (data.status === 'in_progress' || data.status === 'waiting') {
+      const flag = readHardStop()
+      const exempt = force === true && typeof actor === 'string' && flag.exemptAgents.includes(actor.trim().toLowerCase())
+      if (flag.newDevStopActive && !exempt) {
+        json(res, { error: NEW_DEV_STOP_MESSAGE }, 409)
+        return true
+      }
+    }
     const id = randomUUID().slice(0, 8)
     createKanbanCard({ id, ...data })
     json(res, { ok: true, id })
@@ -227,8 +311,23 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   if (kanbanCardMatch && method === 'PUT') {
     const id = decodeURIComponent(kanbanCardMatch[1])
     const body = await readBody(req)
-    const data = JSON.parse(body.toString())
-    if (updateKanbanCard(id, data)) { json(res, { ok: true }); return true }
+    const { actor, force, ...data } = JSON.parse(body.toString()) as Record<string, unknown>
+    if (newDevStopWouldBlock(id, data.status, force === true, typeof actor === 'string' ? actor : undefined)) {
+      json(res, { error: NEW_DEV_STOP_MESSAGE }, 409)
+      return true
+    }
+    if (updateKanbanCard(id, data, { actor: typeof actor === 'string' ? actor : undefined, force: force === true })) {
+      json(res, { ok: true }); return true
+    }
+    // Card c4f2de32: distinguish "no such card" from "refused to re-open reviewed work", so the
+    // caller learns what to do instead of retrying blindly.
+    if (getKanbanCard(id)) {
+      json(res, {
+        error:
+          'A kártya waiting állapotban REVIEW-ra vár: nem húzható vissza in_progress-be, amíg egy gate nem írt rá verdiktet (PASS/GO vagy FAIL/NO-GO). Ha tudatosan újra akarod nyitni, küldd force: true értékkel.',
+      }, 409)
+      return true
+    }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
@@ -245,11 +344,22 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   if (kanbanMoveMatch && method === 'POST') {
     const id = decodeURIComponent(kanbanMoveMatch[1])
     const body = await readBody(req)
-    const { status, sort_order, actor } = JSON.parse(body.toString())
-    if (moveKanbanCard(id, status, sort_order ?? 0, actor)) {
+    const { status, sort_order, actor, force } = JSON.parse(body.toString())
+    if (newDevStopWouldBlock(id, status, force === true, typeof actor === 'string' ? actor : undefined)) {
+      json(res, { error: NEW_DEV_STOP_MESSAGE }, 409)
+      return true
+    }
+    if (moveKanbanCard(id, status, sort_order ?? 0, actor, force === true)) {
       // Wake the assigned agent once when the card enters in_progress.
-      if (status === 'in_progress') fireKanbanDispatch(id)
+      if (status === 'in_progress') fireKanbanDispatch(id, actor)
       json(res, { ok: true })
+      return true
+    }
+    if (getKanbanCard(id)) {
+      json(res, {
+        error:
+          'A kártya waiting állapotban REVIEW-ra vár: nem húzható vissza in_progress-be, amíg egy gate nem írt rá verdiktet (PASS/GO vagy FAIL/NO-GO). Ha tudatosan újra akarod nyitni, küldd force: true értékkel.',
+      }, 409)
       return true
     }
     json(res, { error: 'Kártya nem található' }, 404)

@@ -384,10 +384,64 @@ export function initDatabase(dbPathOverride?: string): void {
       from_status TEXT,
       to_status TEXT NOT NULL,
       actor TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      forced INTEGER NOT NULL DEFAULT 0
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_events_card ON kanban_card_events(card_id, created_at)`)
+
+  // --- Timestamp integrity (card a06314ea) ---------------------------------
+  // Every timestamp in this schema is a UNIX EPOCH INTEGER, and every reader assumes it: the
+  // stuck-card monitor and the re-dispatch guard both do epoch arithmetic. A row written with a
+  // "2026-07-31 14:53:49" TEXT value does not fail anywhere -- it silently poisons those
+  // calculations, which is how it was found.
+  //
+  // The API never writes text (db.ts uses Math.floor(Date.now()/1000) throughout). The rows that
+  // went wrong came from agents writing DIRECTLY into SQLite with datetime('now') or a Python ISO
+  // string, so a TypeScript-side fix could not have caught them. A TRIGGER can: it fires for the
+  // sqlite3 CLI exactly as it does for the app, and it fails LOUDLY with the correct form in the
+  // message instead of letting a bad value land.
+  //
+  // Repair first (the trigger would otherwise reject an UPDATE touching an already-bad row).
+  db.exec(`
+    UPDATE kanban_cards SET created_at = CAST(strftime('%s', created_at) AS INTEGER)
+     WHERE typeof(created_at) <> 'integer' AND strftime('%s', created_at) IS NOT NULL;
+    UPDATE kanban_cards SET updated_at = CAST(strftime('%s', updated_at) AS INTEGER)
+     WHERE typeof(updated_at) <> 'integer' AND strftime('%s', updated_at) IS NOT NULL;
+    UPDATE kanban_comments SET created_at = CAST(strftime('%s', created_at) AS INTEGER)
+     WHERE typeof(created_at) <> 'integer' AND strftime('%s', created_at) IS NOT NULL;
+  `)
+  for (const [table, column] of [
+    ['kanban_cards', 'created_at'],
+    ['kanban_cards', 'updated_at'],
+    ['kanban_comments', 'created_at'],
+  ] as const) {
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_${table}_${column}_epoch_insert
+      BEFORE INSERT ON ${table}
+      WHEN typeof(NEW.${column}) <> 'integer'
+      BEGIN
+        SELECT RAISE(ABORT, '${table}.${column} must be a unix epoch INTEGER (use unixepoch(), not datetime()/an ISO string)');
+      END;
+    `)
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_${table}_${column}_epoch_update
+      BEFORE UPDATE OF ${column} ON ${table}
+      WHEN typeof(NEW.${column}) <> 'integer'
+      BEGIN
+        SELECT RAISE(ABORT, '${table}.${column} must be a unix epoch INTEGER (use unixepoch(), not datetime()/an ISO string)');
+      END;
+    `)
+  }
+  // Migration (card c4f2de32, review-guard follow-up): mark the transitions that only happened
+  // because a caller passed `force`. Without it a forced re-open is indistinguishable afterwards
+  // from a regular one -- and the whole point of the guard is that re-opening reviewed work leaves
+  // a trace.
+  try {
+    db.exec('ALTER TABLE kanban_card_events ADD COLUMN forced INTEGER NOT NULL DEFAULT 0')
+  } catch {
+    // column already exists
+  }
 
   // --- Kanban labels (tags) -----------------------------------------------
   // Labels are a separate registry (not hardcoded per-card strings) so the
@@ -1704,23 +1758,135 @@ export function createKanbanCard(card: {
   )
 }
 
-export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>): boolean {
+/** Authors whose PASS/FAIL/GO/NO-GO counts as a gate verdict -- the same set the gate-scan scripts
+ *  filter on. The orchestrator is deliberately NOT here (card c4f2de32): the main agent's routine
+ *  tiering sentence ("DONE csak QA PASS + Cybersec GO") reads exactly like a verdict, so counting it
+ *  would silently switch the guard off for that card and bring the churn straight back. Nor is the
+ *  card's own author -- a "REVIEW ... tests PASS" must not clear its own review. */
+const GATE_AUTHORS = ['qa', 'qa2', 'cybersec', 'cybersec2', 'cybered']
+
+/** A verdict is ANCHORED at the start of the comment (card c4f2de32, Cybersec NO-GO). Matching
+ *  anywhere in the opening 200 characters let a passing MENTION of a verdict -- "the paired card got
+ *  its GO", a progress note written after the QA PASS -- clear the guard. */
+const VERDICT_HEAD_RE = /^\W*(?:\[[^\]]{0,32}\]\s*)?(?:[A-Z][A-Z0-9_-]{0,16}\s+){0,3}(PASS|FAIL|GO|NO-GO)\b/i
+
+/** Comments the offload script posts on the card automatically. They are 7B free text, so a phrase
+ *  inside one must never decide whether a workflow control holds (same class as the 3307b428
+ *  draft-guard finding). Skipped before any classification. */
+const DRAFT_MARKER_RE = /^\W*(\[)?LOCAL[- ]?LLM/i
+
+function isDraftComment(content: string): boolean {
+  return DRAFT_MARKER_RE.test((content || '').trimStart())
+}
+
+function firstLine(content: string): string {
+  return (content || '').trim().split('\n')[0] ?? ''
+}
+
+/**
+ * The last signal a card carries in its comments:
+ *   'review'  -- the author reported the work done and no GATE has judged it since;
+ *   'verdict' -- a gate answered after that REVIEW (PASS/GO or FAIL/NO-GO);
+ *   'none'    -- neither exists.
+ *
+ * Each class is looked up on its OWN (newest REVIEW, newest gate verdict) rather than scanned in a
+ * fixed window (card c4f2de32, Cybersec NO-GO): with a 20-comment window, a chatty card pushed its
+ * own REVIEW out of view and the guard stopped seeing it -- comment volume must not decide whether a
+ * control holds.
+ */
+export function latestKanbanSignal(cardId: string): 'review' | 'verdict' | 'none' {
+  const rows = db.prepare(
+    'SELECT id, author, content FROM kanban_comments WHERE card_id = ? ORDER BY id DESC'
+  ).all(cardId) as { id: number; author: string; content: string }[]
+
+  let lastReviewId = 0
+  let lastVerdictId = 0
+  for (const r of rows) {
+    if (isDraftComment(r.content)) continue
+    const head = firstLine(r.content)
+    const author = (r.author || '').toLowerCase()
+    if (lastVerdictId === 0 && GATE_AUTHORS.includes(author) && VERDICT_HEAD_RE.test(head)) {
+      lastVerdictId = r.id
+    }
+    if (lastReviewId === 0 && /^\W*REVIEW\b/i.test(head)) lastReviewId = r.id
+    if (lastReviewId !== 0 && lastVerdictId !== 0) break
+  }
+
+  if (lastReviewId === 0 && lastVerdictId === 0) return 'none'
+  return lastVerdictId > lastReviewId ? 'verdict' : 'review'
+}
+
+/**
+ * True when moving `id` to `in_progress` would re-open work that is finished and waiting to be
+ * judged (card c4f2de32).
+ *
+ * The failure this prevents, seen three times in one afternoon: a card sits at waiting with a
+ * REVIEW comment and a commit, something flips it back to in_progress, and the next agent to look
+ * at the board sees "in progress, no movement" and rebuilds work that already exists. A gate FAIL
+ * is the legitimate way back into in_progress -- and that leaves a verdict comment, which is
+ * exactly what distinguishes the two cases.
+ */
+export function reviewedCardBlocksInProgress(id: string, nextStatus: string): boolean {
+  if (nextStatus !== 'in_progress') return false
+  const current = (db.prepare('SELECT status FROM kanban_cards WHERE id=?').get(id) as { status: string } | undefined)?.status
+  if (current !== 'waiting') return false
+  // FAIL-CLOSED (card c4f2de32, Cybersec NO-GO): only a gate verdict newer than the last REVIEW
+  // opens the way back. An unclassifiable card blocks too -- a waiting card whose comments say
+  // nothing is exactly the case where re-opening it silently is most likely to be a mistake, and
+  // `force` (recorded as such) is the deliberate way through.
+  return latestKanbanSignal(id) !== 'verdict'
+}
+
+/**
+ * Update a card's fields. A status change made THROUGH THIS PATH is audited like a move
+ * ({@link moveKanbanCard}) instead of silently rewriting the column: an unaudited status write is
+ * how a waiting+REVIEW card kept reappearing as in_progress with nothing in kanban_card_events to
+ * show for it (card c4f2de32).
+ *
+ * Returns false and changes NOTHING when the status change is blocked by
+ * {@link reviewedCardBlocksInProgress} -- pass `force` for the rare deliberate override.
+ */
+export function updateKanbanCard(
+  id: string,
+  fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>,
+  opts?: { actor?: string; force?: boolean }
+): boolean {
   const card = getKanbanCard(id)
   if (!card) return false
+  const statusChanges = fields.status !== undefined && fields.status !== card.status
+  const blocked = statusChanges && reviewedCardBlocksInProgress(id, fields.status as string)
+  if (blocked && !opts?.force) return false
+  // Record forced=1 whenever a force override was actually exercised on this transition -- either
+  // the reviewed-card-reopen guard (`blocked`) or the newDevStop threshold guard at the route layer
+  // (`opts.force` on a planned->in_progress move). Previously only `blocked` was recorded, so a
+  // newDevStop force:true bypass showed as forced=0 in the audit trail, indistinguishable from an
+  // unguarded gap (investigation 2026-08-02, cards 8c4a6d9c/cf068369/89fba8e4).
+  const forcedFlag = (blocked || (statusChanges && fields.status === 'in_progress' && opts?.force)) ? 1 : 0
   const now = Math.floor(Date.now() / 1000)
   const f = { ...card, ...fields, updated_at: now }
-  return db.prepare(
+  const changed = db.prepare(
     `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
      WHERE id=?`
   ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, id).changes > 0
+  if (changed && statusChanges) {
+    db.prepare(
+      'INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at, forced) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(id, card.status, f.status, opts?.actor ?? null, now, forcedFlag)
+  }
+  return changed
 }
 
 export function getChildCards(parentId: string): KanbanCard[] {
   return db.prepare('SELECT * FROM kanban_cards WHERE parent_id = ? AND archived_at IS NULL ORDER BY sort_order ASC').all(parentId) as KanbanCard[]
 }
 
-export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number, actor?: string): boolean {
+export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number, actor?: string, force?: boolean): boolean {
   const now = Math.floor(Date.now() / 1000)
+  // Card c4f2de32: a card waiting on an unanswered REVIEW is finished work, not stalled work --
+  // pulling it back to in_progress is what made other agents rebuild it. A gate FAIL leaves a
+  // verdict comment and is allowed through; `force` covers a deliberate human override.
+  const forcedOverride = reviewedCardBlocksInProgress(id, status)
+  if (forcedOverride && !force) return false
   // Read the previous status first so we only record an audit event on a real
   // status transition (not a pure sort_order reorder within the same column).
   const prev = (db.prepare('SELECT status FROM kanban_cards WHERE id=?').get(id) as { status: string } | undefined)?.status
@@ -1728,9 +1894,13 @@ export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrd
     'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
   ).run(status, sortOrder, now, id).changes > 0
   if (changed && prev !== undefined && prev !== status) {
+    // `forced` records whether THIS call used a force override of ANY guard (reviewed-card-reopen
+    // OR the newDevStop threshold at the route layer) -- previously only forcedOverride (the
+    // reviewed-card guard) was recorded, so a newDevStop force:true bypass showed as forced=0 in
+    // the audit trail, indistinguishable from a real guard gap (investigation 2026-08-02).
     db.prepare(
-      'INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at) VALUES (?, ?, ?, ?, ?)'
-    ).run(id, prev, status, actor ?? null, now)
+      'INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at, forced) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(id, prev, status, actor ?? null, now, (forcedOverride || force) ? 1 : 0)
   }
   return changed
 }
@@ -1838,6 +2008,9 @@ export interface KanbanCardEvent {
   to_status: string
   actor: string | null
   created_at: number
+  /** 1 when the transition only happened because the caller passed `force` past the
+   *  reviewed-card guard (card c4f2de32). 0 for every ordinary move. */
+  forced: number
 }
 
 export function getKanbanCardEvents(cardId: string): KanbanCardEvent[] {
