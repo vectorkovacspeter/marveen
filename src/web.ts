@@ -70,6 +70,7 @@ import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleSpans } from './web/routes/spans.js'
 import { tryHandleSkillUsage } from './web/routes/skill-usage.js'
 import { tryHandleSettings } from './web/routes/settings.js'
+import { tryHandleIntegrations } from './web/routes/integrations.js'
 import { tryHandleAuditLog } from './web/routes/audit-log.js'
 import { tryHandleFleetQ } from './web/routes/fleet-q.js'
 import { tryHandleStatic } from './web/routes/static.js'
@@ -206,6 +207,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleToolLog(routeCtx)) return
       if (await tryHandleSkillUsage(routeCtx)) return
       if (await tryHandleSettings(routeCtx)) return
+      if (await tryHandleIntegrations(routeCtx)) return
       if (await tryHandleVoice(routeCtx)) return
       if (await tryHandleVaultSshKeys(routeCtx)) return
       if (await tryHandleVaultSsh(routeCtx)) return
