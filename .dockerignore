@@ -6,8 +6,15 @@
 node_modules
 dist
 
-# Runtime state — mounted as volumes at runtime, NEVER baked into the image
-store
+# Runtime state — mounted as volumes at runtime, NEVER baked into the image.
+# EXCEPT the tracked operational scripts/templates under store/ (code, not data):
+# they must ship in the image (the local-llm offload feature + its tests read them).
+# A runtime volume still overlays store/ for the DB/tokens/state JSON.
+store/**
+!store/*.sh
+!store/cybersec-gate-scan.py
+!store/local-llm-model
+!store/local-llm-skills/**
 agents
 workspace
 reports

@@ -57,6 +57,10 @@ COPY web        ./web
 COPY templates  ./templates
 COPY seed-skills ./seed-skills
 COPY seed-scheduled-tasks ./seed-scheduled-tasks
+# Tracked store ops-scripts + local-llm skill templates (.dockerignore filters store/
+# to just these tracked code files; runtime data still comes from the mounted volume).
+# The local-llm offload feature and its tests read store/local-llm.sh + local-llm-skills/*.txt.
+COPY store ./store
 # Root installer/updater scripts some static tests assert against.
 COPY install.sh install-linux.sh install-macos.sh install-lang.sh update.sh install-windows.ps1 ./
 # `claude` on PATH so resolveFromPath('claude') (module-load in channel-monitor /
