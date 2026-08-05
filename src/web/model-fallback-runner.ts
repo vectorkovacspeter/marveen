@@ -4,6 +4,7 @@ import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { hardRestartMarveenChannels } from './channel-monitor.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { isValidModelId, InvalidModelIdError } from '../model-id.js'
 import {
   listAgentNames,
   readAgentRemoteHost,

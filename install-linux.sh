@@ -209,8 +209,33 @@ APT_OPTS="-o DPkg::Lock::Timeout=180"
 #
 # HAROM retegben zarjuk ki, mert egy reteg sem eleg onmagaban:
 #   1. DEBIAN_FRONTEND=noninteractive -- a debconf keresek ellen.
-#   2. NEEDRESTART_MODE=a + NEEDRESTART_SUSPEND=1 -- a needrestart apt-hookja
-#      ellen; ez az, ami a konkret gepet megfogta, es amit a frontend NEM fed.
+#   2. NEEDRESTART_SUSPEND=1 (+ NEEDRESTART_MODE=l tartalek) -- a needrestart
+#      apt-hookja ellen; ez az, ami a konkret gepet megfogta, es amit a frontend
+#      NEM fed.
+#
+#      MIERT "l" ES NEM "a", holott az "a" is elnemitja a kerdest (merve az eles
+#      gepen, needrestart 3.11 / Ubuntu 26.04, 2026-08-02):
+#        - /usr/lib/needrestart/apt-pinvoke 43-46. sor: ha NEEDRESTART_SUSPEND
+#          nem ures, kiir egy sort es `exit 0` -- az `exec needrestart` CSAK
+#          ezutan, az 49. sorban jon. Tehat SUSPEND mellett a needrestart EL SEM
+#          INDUL: sem dialogus, sem ujrainditas. A MODE azon az uton sosem jut
+#          ervenyre.
+#        - A MODE tehat TARTALEK: azokra a (regebbi) verziokra, amelyek hookja
+#          esetleg nem nezi a SUSPEND-et. Es ha a tartalek lep ervenybe, akkor
+#          szamit, MELYIK erteket adtuk: a needrestart -r modjai l = list only,
+#          i = interactive, a = automatically restart.
+#        - Az "a" tehat ujrainditana a varakozo szolgaltatasokat A TELEPITES
+#          KOZBEN. A cel-gepen ez negy szolgaltatast jelentett (dbus,
+#          networkd-dispatcher, serial-getty@ttyS0, systemd-logind), es a
+#          telepito KESOBB epit a felhasznaloi session-buszra (XDG_RUNTIME_DIR /
+#          DBUS_SESSION_BUS_ADDRESS), majd meg kesobb user-unitokat allit be. Egy
+#          dbus/logind restart a csomag-lepesben tehat egy MASIK, kesobbi lepest
+#          buktathatna el -- olyan hibat, ami semmivel nem utal vissza az aptra.
+#        - Az "l" ugyanugy nem kerdez, de nem is indit ujra semmit: a fuggo
+#          szolgaltatasok a kovetkezo rebootig a regi konyvtarakkal futnak, ami
+#          egy friss telepitesnel rendben van.
+#      NE ALLITSD VISSZA "a"-ra azzal, hogy "az alaposabb" -- itt epp az a
+#      kockazat, hogy a tartalek TOBBET csinal, mint amit kertunk tole.
 #   3. </dev/null minden hivason -- ha egy hook megis kerdez, azonnal EOF-ot kap
 #      a helyett, hogy a telepito sajat stdinjere varna.
 #
@@ -221,8 +246,8 @@ APT_OPTS="-o DPkg::Lock::Timeout=180"
 #   sudo -E printenv DEBIAN_FRONTEND                          -> noninteractive
 # Ezert a sudo-s hivasoknal a valtozok a parancs ele kerulnek, es az export CSAK
 # a `sudo -E`-vel indulo gyerekek (nodesource setup-script) miatt marad meg.
-NONINTERACTIVE_ENV="DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1"
-export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+NONINTERACTIVE_ENV="DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1"
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
 # A meglevo config-fajlokat megtartjuk, ujat nem kerdezunk: a "melyik verziot
 # tartsam meg?" dpkg-prompt ugyanugy megallitana a telepitest, mint a needrestart.
 DPKG_KEEP_CONF="-o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
@@ -672,6 +697,14 @@ else
     fi
 
   else
+    # Record that skipping was a CHOICE, here, at the moment it is made
+    # (INSTDEAD803). Without this the only later evidence is the ABSENCE of
+    # credentials, and absence cannot tell "the operator decided to set this up
+    # later" apart from "the sign-in broke halfway" -- which is exactly the
+    # dead end a bootcamp host hit on 2026-08-03. The installer app reads this
+    # flag to decide whether an install is finished or unfinished. It is not a
+    # renunciation: completing the sign-in later stays available on request.
+    CLAUDE_AUTH_DEFERRED=1
     echo -e "  ${DIM}Kihagyva. Kesobb allitsd be:${NC}"
     echo -e "  ${DIM}  export ANTHROPIC_API_KEY=sk-ant-...${NC}"
     echo -e "  ${DIM}  vagy: claude setup-token (boengeszos gepen), majd export CLAUDE_CODE_OAUTH_TOKEN=...${NC}"
@@ -1002,6 +1035,16 @@ else
   env_keep_or_set SLACK_BOT_TOKEN "${SLACK_BOT_TOKEN}"
   env_keep_or_set SLACK_APP_TOKEN "${SLACK_APP_TOKEN}"
 fi
+# The operator's deliberate "set auth up later" choice, persisted next to the
+# rest of the configuration. Written only when the skip branch above set it, so
+# it is a record of a decision and never an inference from missing credentials.
+# If the run dies before this point the flag is simply absent, which reads as
+# "unfinished" -- the safe direction, since that offers help rather than
+# assuming the operator wanted no auth.
+if [ "${CLAUDE_AUTH_DEFERRED:-}" = "1" ]; then
+  env_merge_key CLAUDE_AUTH_DEFERRED 1
+fi
+
 # Claude auth credentials (API key or OAuth token) -- channels.sh reads
 # these selectively so the tmux-spawned claude process can authenticate.
 # Merged by key, so an auth line saved by a previous run (or the dashboard
@@ -1631,7 +1674,17 @@ WorkingDirectory=$INSTALL_DIR
 # load for the current Node ABI before starting (2026-07-03 crash-loop fix).
 ExecStartPre=$INSTALL_DIR/scripts/ensure-native-modules.sh
 ExecStart=$INSTALL_DIR/scripts/channels.sh
-Restart=on-failure
+# Restart=always, NOT on-failure. channels.sh has watchdog branches that exit ON
+# PURPOSE to be restarted (sustained plugin death, plugin never started), and
+# under on-failure a zero exit read as "service finished" and the channel stayed
+# dead for good -- silently, with no failed unit to notice. macOS never showed
+# this because the launchd plist uses KeepAlive=true, which restarts regardless
+# of exit code; this line is what makes the Linux side symmetric with it.
+# Observed on a live v1.27.0 install 2026-08-04: unit inactive/dead after
+# ExecMainStatus=0, ten minutes before anyone looked.
+# Restart churn stays bounded by StartLimitIntervalSec/StartLimitBurst in
+# [Unit] above plus channels.sh's own rapid-failure backoff (sleep 60/300).
+Restart=always
 RestartSec=10
 StandardOutput=append:$INSTALL_DIR/store/channels.log
 StandardError=append:$INSTALL_DIR/store/channels.error.log
@@ -1948,8 +2001,9 @@ if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ "$CHAT_ID" = "0" ]; then
   echo ""
   echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e "${RED}$(_t warn_pair_missing)${NC}"
-  echo -e "${ORANGE}  Az ALLOWED_CHAT_ID=0 marad az .env-ben, ami azt jelenti${NC}"
-  echo -e "${ORANGE}  hogy a bot NEM fog valaszolni senkinek.${NC}"
+  echo -e "${ORANGE}  Az ALLOWED_CHAT_ID=0 marad az .env-ben. A bot a beszelgetesre${NC}"
+  echo -e "${ORANGE}  valaszolni FOG (azt a parositas donti el), de a MAGATOL kuldott${NC}"
+  echo -e "${ORANGE}  uzenetek elmaradnak: napi naplo, uj agens udvozlese, riasztasok.${NC}"
   echo ""
   echo -e "  ${BOLD}Javitas:${NC}"
   echo -e "  1. Irj a botodnak Telegramon (barmit)"

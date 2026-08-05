@@ -78,9 +78,9 @@ describe('the writer chokepoint refuses a bad id before touching disk', () => {
   })
 
   // Card 6610edff (Cybered 7139): writeMainModel is the MAIN-agent sibling of writeAgentModel and a
-  // persisted-model writer that skipped the allowlist. It is a private, IO-side-effecting fn
-  // in the heavy model-fallback-runner module (never imported by a test), so we pin the guard at the
-  // source: it must call isValidModelId(model) and BEFORE it ever writes .claude/settings.json.
+  // persisted-model writer that skipped the allowlist. It is a private, IO-side-effecting fn in the
+  // heavy model-fallback-runner module (never imported by a test), so we pin the guard at the source:
+  // it must call isValidModelId(model) BEFORE it ever writes .claude/settings.json.
   it('writeMainModel validates the id BEFORE the write chokepoint', () => {
     const runnerSrc = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'model-fallback-runner.ts'),
