@@ -12616,6 +12616,10 @@ async function loadOverview() {
     const res = await fetch('/api/overview')
     if (!res.ok) throw new Error('HTTP ' + res.status)
     const d = await res.json()
+    // Claude usage info widget (card a91c6039 redesign): load auto-sourced data.
+    void loadWeeklyGauge()
+    void loadWeeklyThresholds()
+    void loadModelTierConfig()
     // Stats
     document.getElementById('statAgents').textContent = d.agents.running
     document.getElementById('statAgentsSub').textContent = t('overview.stat.agents_sub', { n: d.agents.total })
@@ -12661,6 +12665,376 @@ async function loadOverview() {
     document.getElementById('overviewActivity').innerHTML = '<div style="color:var(--text-muted);font-size:13px">' + t('overview.error', { msg: escapeHtml(String(err.message || err)) }) + '</div>'
   }
 }
+
+// Editable weekly new-dev-stop thresholds (card f3248478). Cached module-level so
+// barColor() (weekly row only) reflects whatever the sliders currently hold, not the
+// CLAUDE.md defaults, once loaded.
+let _weeklyThresholds = { gt3days: 90, lt2days: 92, lt1day: 95 }
+
+// Claude Usage Info widget (card a91c6039 redesign). Read-only: renders 3 usage bars
+// (weekly-all / session / fable) + optional promo from /api/costs/weekly. No manual input.
+// Threshold colors (weekly row): < gt3days = success, gt3days..lt1day = accent, >= lt1day = danger.
+// Session/fable rows are plain 5h-session metrics, unrelated to the weekly-threshold config -- kept
+// at the original fixed 90/95 breakpoints.
+async function loadWeeklyGauge() {
+  const card = document.getElementById('quotaGaugeCard')
+  if (!card) return
+  const emptyEl = document.getElementById('quotaGaugeEmpty')
+  const errEl = document.getElementById('usageInfoError')
+  const sourceEl = document.getElementById('usageInfoSource')
+
+  function barColor(pct) {
+    return pct >= 95 ? 'var(--danger)' : pct >= 90 ? 'var(--accent)' : 'var(--success)'
+  }
+
+  function barColorWeekly(pct) {
+    const { gt3days, lt1day } = _weeklyThresholds
+    return pct >= lt1day ? 'var(--danger)' : pct >= gt3days ? 'var(--accent)' : 'var(--success)'
+  }
+
+  function renderBar(rowId, fillId, pctId, resetId, metric, colorFn) {
+    const row = document.getElementById(rowId)
+    if (!row) return
+    if (!metric || typeof metric.pct !== 'number') { row.hidden = true; return }
+    const pct = Math.max(0, Math.min(100, metric.pct))
+    const fill = document.getElementById(fillId)
+    const pctEl = document.getElementById(pctId)
+    const resetEl = document.getElementById(resetId)
+    if (fill) { fill.style.width = pct + '%'; fill.style.background = (colorFn || barColor)(pct) }
+    if (pctEl) pctEl.textContent = pct + '%'
+    if (resetEl) resetEl.textContent = metric.resetAt ? t('overview.quota.resets', { at: metric.resetAt }) : ''
+    row.hidden = false
+  }
+
+  try {
+    const res = await fetch('/api/costs/weekly')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const d = await res.json()
+    if (emptyEl) emptyEl.hidden = true
+    if (errEl) errEl.hidden = true
+
+    if (d.available && typeof d.pct === 'number') {
+      // Weekly All-models row (always shown when data is present)
+      renderBar('usageRowWeekly', 'usageBarFillWeekly', 'usageBarPctWeekly', 'usageResetWeekly',
+        { pct: d.pct, resetAt: d.resetAt }, barColorWeekly)
+
+      // Session row (shown when snapshot includes session metric)
+      renderBar('usageRowSession', 'usageBarFillSession', 'usageBarPctSession', 'usageResetSession', d.session)
+
+      // Fable row (shown when snapshot includes fable metric)
+      renderBar('usageRowFable', 'usageBarFillFable', 'usageBarPctFable', 'usageResetFable', d.fable)
+
+      // Promo badge
+      const promoEl = document.getElementById('usageInfoPromo')
+      if (promoEl) { promoEl.textContent = d.promo || ''; promoEl.hidden = !d.promo }
+
+      // Source badge (panel / oauth / manual)
+      if (sourceEl && d.source) {
+        const labels = { panel: t('overview.quota.source.panel'), oauth: t('overview.quota.source.oauth'), manual: t('overview.quota.source.manual') }
+        sourceEl.textContent = labels[d.source] || d.source
+        sourceEl.hidden = false
+      }
+    } else {
+      // No snapshot recorded yet
+      const weeklyRow = document.getElementById('usageRowWeekly')
+      if (weeklyRow) weeklyRow.hidden = true
+      if (emptyEl) emptyEl.hidden = false
+      if (sourceEl) sourceEl.hidden = true
+    }
+  } catch (err) {
+    if (errEl) { errEl.textContent = t('overview.quota.error'); errEl.hidden = false }
+    if (emptyEl) emptyEl.hidden = true
+    if (sourceEl) sourceEl.hidden = true
+  }
+}
+
+// Card 52de847d (Cybersec): 100% is a valid slider value but means "never stop" -- it
+// silently disables the weekly-limit protection. Make that visually distinct from 99%
+// so an operator can't mistake it for an ordinary high setting.
+function updateThresholdWarn(id, value) {
+  const warn = document.getElementById(id + 'Warn')
+  const val = document.getElementById(id + 'Val')
+  const isMax = Number(value) >= 100
+  if (warn) warn.hidden = !isMax
+  if (val) val.classList.toggle('usage-threshold-val--warn', isMax)
+}
+
+// GET the editable weekly-threshold config and populate the 2-slider UI (cards e7a26045,
+// 4da9ae0b). Fetched every time the gauge loads, so the sliders never show a stale value
+// after another session/tab edits them.
+async function loadWeeklyThresholds() {
+  try {
+    const res = await fetch('/api/costs/weekly-thresholds')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const cfg = await res.json()
+    const map = { thrNewDevStop: cfg.newDevStop, thrTestStop: cfg.testStop }
+    for (const [id, val] of Object.entries(map)) {
+      const input = document.getElementById(id)
+      const label = document.getElementById(id + 'Val')
+      if (input) input.value = val
+      if (label) label.textContent = val + '%'
+      updateThresholdWarn(id, val)
+    }
+    // The sliders start disabled (HTML) so a save can never fire against the browser's raw
+    // default range position before this fetch resolves -- only enable once real config is
+    // actually in the DOM.
+    const saveBtn = document.getElementById('thresholdSaveBtn')
+    if (saveBtn) saveBtn.disabled = false
+  } catch {
+    // Keep the built-in defaults (already in the HTML value= attributes). Save stays
+    // disabled (fail-closed): saving unknown default values would be worse than not saving.
+  }
+}
+
+// Model-tier stepdown panel (card 5d2002b5 redesign): enable toggle + two
+// weekly-% sliders (editable) + a READ-ONLY per-agent state list. The editable model chain was
+// removed -- the ladder is now the shared, dynamic model list (src/model-catalog.ts) and each
+// agent steps from its OWN base, so there is nothing to hand-edit here. Thresholds save via
+// POST /api/costs/model-fallback; the per-agent state is read from
+// GET /api/costs/model-fallback/agents (base model, effective tier, current model, ramp target).
+
+function renderModelTierState(state) {
+  const list = document.getElementById('mtAgentState')
+  if (!list) return
+  list.innerHTML = ''
+  const agents = state && Array.isArray(state.agents) ? state.agents : []
+  if (agents.length === 0) {
+    const li = document.createElement('li')
+    li.className = 'usage-modeltier-state-empty'
+    li.textContent = t('overview.quota.modeltier.stateEmpty')
+    list.appendChild(li)
+    return
+  }
+  for (const a of agents) {
+    const li = document.createElement('li')
+    li.className = 'usage-modeltier-state-item'
+
+    const name = document.createElement('span')
+    name.className = 'usage-modeltier-state-name'
+    name.textContent = a.name
+
+    const tier = document.createElement('span')
+    tier.className = 'usage-modeltier-state-tier'
+    tier.textContent = a.exempt
+      ? t('overview.quota.modeltier.exemptTag')
+      : t('overview.quota.modeltier.tierTag', { n: a.tier })
+
+    // Base -> current model. When the two differ the agent has been stepped down; showing both
+    // makes the ramp visible without a second click.
+    const models = document.createElement('span')
+    models.className = 'usage-modeltier-state-models'
+    if (a.currentModel === a.baseModel) {
+      models.textContent = a.currentLabel
+    } else {
+      models.textContent = a.baseLabel + ' → ' + a.currentLabel
+    }
+    models.title = t('overview.quota.modeltier.stateAria', {
+      base: a.baseLabel, current: a.currentLabel, target: a.targetLabel,
+    })
+
+    li.append(name, tier, models)
+    list.appendChild(li)
+  }
+}
+
+async function loadModelTierConfig() {
+  try {
+    const res = await fetch('/api/costs/model-fallback')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const cfg = await res.json()
+    const enabled = document.getElementById('mtEnabled')
+    if (enabled) enabled.checked = cfg.weeklyTierEnabled === true
+    const map = { mtTier1: cfg.weeklyTier1Percent, mtTier2: cfg.weeklyTier2Percent }
+    for (const [id, val] of Object.entries(map)) {
+      const input = document.getElementById(id)
+      const label = document.getElementById(id + 'Val')
+      if (input && Number.isFinite(Number(val))) input.value = val
+      if (label && Number.isFinite(Number(val))) label.textContent = val + '%'
+    }
+    const saveBtn = document.getElementById('mtSaveBtn')
+    if (saveBtn) saveBtn.disabled = false
+  } catch {
+    // Keep the HTML defaults; save stays disabled (fail-closed) so we never persist
+    // guessed values over a real config we simply failed to read.
+  }
+  // The per-agent state comes from its own endpoint; a failure there leaves an honest
+  // error row without blocking the (separately-loaded) threshold sliders.
+  try {
+    const res = await fetch('/api/costs/model-fallback/agents')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    renderModelTierState(await res.json())
+  } catch {
+    const list = document.getElementById('mtAgentState')
+    if (list) {
+      list.innerHTML = ''
+      const li = document.createElement('li')
+      li.className = 'usage-modeltier-state-empty'
+      li.textContent = t('overview.quota.modeltier.stateError')
+      list.appendChild(li)
+    }
+  }
+}
+
+// Wiring for the Claude Limit panel's help modal + threshold sliders + model-tier
+// controls (cards f3248478, e7a26045, 5d2002b5). Runs once at script load -- the elements
+// are static HTML, not re-created per navigation.
+;(function wireQuotaThresholdControls() {
+  const helpBtn = document.getElementById('quotaHelpBtn')
+  const helpOverlay = document.getElementById('quotaHelpOverlay')
+  const helpClose = document.getElementById('quotaHelpClose')
+  if (helpBtn && helpOverlay) {
+    helpBtn.addEventListener('click', () => openModal(helpOverlay))
+  }
+  if (helpClose && helpOverlay) {
+    helpClose.addEventListener('click', () => closeModal(helpOverlay))
+  }
+  if (helpOverlay) {
+    helpOverlay.addEventListener('click', (e) => { if (e.target === helpOverlay) closeModal(helpOverlay) })
+  }
+
+  const toggle = document.getElementById('thresholdToggle')
+  const body = document.getElementById('thresholdBody')
+  if (toggle && body) {
+    toggle.addEventListener('click', () => {
+      const expanded = toggle.getAttribute('aria-expanded') === 'true'
+      toggle.setAttribute('aria-expanded', String(!expanded))
+      body.hidden = expanded
+    })
+  }
+
+  // Card e7a26045 (+ d53c1e00's class of bug): redesigned from 3 day-dependent sliders to
+  // 2 flat, day-independent levels (newDevStop <= testStop). Cascade the other slider on
+  // drag so the pair can never be expressed out of order in the UI; the backend still
+  // re-validates on save (defense in depth).
+  const sliderIds = ['thrNewDevStop', 'thrTestStop']
+  function enforceMonotonicSliders(changedId) {
+    const els = {
+      thrNewDevStop: document.getElementById('thrNewDevStop'),
+      thrTestStop: document.getElementById('thrTestStop'),
+    }
+    if (!els.thrNewDevStop || !els.thrTestStop) return
+    let n = Number(els.thrNewDevStop.value)
+    let s = Number(els.thrTestStop.value)
+    if (changedId === 'thrNewDevStop' && n > s) s = n
+    if (changedId === 'thrTestStop' && s < n) n = s
+    els.thrNewDevStop.value = n
+    els.thrTestStop.value = s
+    for (const id of sliderIds) {
+      const label = document.getElementById(id + 'Val')
+      if (label) label.textContent = els[id].value + '%'
+      updateThresholdWarn(id, els[id].value)
+    }
+  }
+  for (const id of sliderIds) {
+    const input = document.getElementById(id)
+    if (input) {
+      input.addEventListener('input', () => enforceMonotonicSliders(id))
+      updateThresholdWarn(id, input.value)
+    }
+  }
+
+  const saveBtn = document.getElementById('thresholdSaveBtn')
+  const statusEl = document.getElementById('thresholdStatus')
+  // "Mentve." auto-dismisses after a few seconds so it reads as a transient toast, not a
+  // permanent label sitting next to a still-active button (card bb5603cc); an error stays
+  // until the user acts (rule 12).
+  let statusHideTimer = null
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      const newDevStop = Number(document.getElementById('thrNewDevStop')?.value)
+      const testStop = Number(document.getElementById('thrTestStop')?.value)
+      saveBtn.disabled = true
+      if (statusHideTimer) { clearTimeout(statusHideTimer); statusHideTimer = null }
+      if (statusEl) { statusEl.hidden = true; statusEl.classList.remove('success', 'error') }
+      try {
+        const res = await fetch('/api/costs/weekly-thresholds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ newDevStop, testStop }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status))
+        if (statusEl) {
+          statusEl.textContent = t('overview.quota.threshold.saved')
+          statusEl.classList.add('success')
+          statusEl.hidden = false
+          statusHideTimer = setTimeout(() => { statusEl.hidden = true }, 3000)
+        }
+      } catch (err) {
+        if (statusEl) {
+          statusEl.textContent = String(err.message || err)
+          statusEl.classList.add('error')
+          statusEl.hidden = false
+        }
+      } finally {
+        saveBtn.disabled = false
+      }
+    })
+  }
+
+  // Model-tier stepdown controls (card 5d2002b5 redesign): collapse toggle, live slider labels,
+  // and save of the two %-thresholds (POST /api/costs/model-fallback). The model chain editor was
+  // removed -- the ladder is the shared dynamic list and the per-agent state below is read-only.
+  // The backend still re-validates (tier1 < tier2), so a bad pair returns a descriptive error.
+  const mtToggle = document.getElementById('modelTierToggle')
+  const mtBody = document.getElementById('modelTierBody')
+  if (mtToggle && mtBody) {
+    mtToggle.addEventListener('click', () => {
+      const expanded = mtToggle.getAttribute('aria-expanded') === 'true'
+      mtToggle.setAttribute('aria-expanded', String(!expanded))
+      mtBody.hidden = expanded
+    })
+  }
+  for (const id of ['mtTier1', 'mtTier2']) {
+    const input = document.getElementById(id)
+    if (input) {
+      input.addEventListener('input', () => {
+        const label = document.getElementById(id + 'Val')
+        if (label) label.textContent = input.value + '%'
+      })
+    }
+  }
+  const mtSaveBtn = document.getElementById('mtSaveBtn')
+  const mtStatus = document.getElementById('mtStatus')
+  let mtStatusTimer = null
+  if (mtSaveBtn) {
+    mtSaveBtn.addEventListener('click', async () => {
+      const enabled = !!document.getElementById('mtEnabled')?.checked
+      const tier1 = Number(document.getElementById('mtTier1')?.value)
+      const tier2 = Number(document.getElementById('mtTier2')?.value)
+      mtSaveBtn.disabled = true
+      if (mtStatusTimer) { clearTimeout(mtStatusTimer); mtStatusTimer = null }
+      if (mtStatus) { mtStatus.hidden = true; mtStatus.classList.remove('success', 'error') }
+      try {
+        // Only the thresholds + enable flag are sent; the chain is no longer dashboard-editable,
+        // so the config's banner chain is left untouched (the POST parser ignores absent fields).
+        const res = await fetch('/api/costs/model-fallback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ weeklyTierEnabled: enabled, weeklyTier1Percent: tier1, weeklyTier2Percent: tier2 }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status))
+        if (mtStatus) {
+          mtStatus.textContent = t('overview.quota.modeltier.saved')
+          mtStatus.classList.add('success')
+          mtStatus.hidden = false
+          mtStatusTimer = setTimeout(() => { mtStatus.hidden = true }, 3000)
+        }
+        // A new threshold can change which tier the fleet is in -- refresh the read-only state.
+        loadModelTierConfig()
+      } catch (err) {
+        if (mtStatus) {
+          mtStatus.textContent = String(err.message || err)
+          mtStatus.classList.add('error')
+          mtStatus.hidden = false
+        }
+      } finally {
+        mtSaveBtn.disabled = false
+      }
+    })
+  }
+})()
 
 // Brand mark + product-brand chrome: pull the configured brand from
 // /api/marveen and apply it to the dashboard chrome (tab title, mobile topbar,
