@@ -106,3 +106,6 @@ __pycache__/
 # Superpowers planning docs (brainstorm specs/plans). Private working notes --
 # never committed, never pushed.
 docs/superpowers/
+
+# Local dev-only compose override (live-mount web/ for UI iteration)
+docker-compose.override.yml
