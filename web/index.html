@@ -255,6 +255,20 @@
       </span>
     </div>
 
+    <!-- Fleet killswitch: global "fleet paused" banner. Shipped hidden; shown
+         from any page while the fleet is paused. Populated by
+         refreshFleetPauseState() from /api/fleet/pause-state. -->
+    <div id="fleetPauseBanner" class="auth-setup-banner fleet-pause-banner" hidden>
+      <span class="fleet-pause-banner-text">
+        <span aria-hidden="true">&#9208;</span>
+        <span id="fleetPauseBannerLabel" data-i18n="fleet.pause.banner">A flotta szüneteltetve</span>
+        <span id="fleetPauseBannerMode" class="fleet-pause-banner-mode"></span>
+      </span>
+      <span class="auth-setup-banner-actions">
+        <button class="btn-secondary btn-compact" id="fleetPauseBannerResume" data-i18n="fleet.pause.resume">Folytatás</button>
+      </span>
+    </div>
+
     <!-- === Overview Page (default) === -->
     <div class="page" id="overviewPage">
       <!-- Claude Usage Info widget (card a91c6039 redesign): 3 usage bars (weekly-all / session /
@@ -1416,6 +1430,13 @@
             Frissítés
           </button>
         </div>
+      </div>
+
+      <!-- Fleet killswitch control card. Populated by renderFleetControl()
+           (called from loadStatus()). -->
+      <div class="fleet-control-card" id="fleetControlCard">
+        <h3 data-i18n="fleet.control.title">Flotta vezérlés</h3>
+        <div class="fleet-control-body" id="fleetControlBody"></div>
       </div>
 
       <div class="status-overall" id="statusOverall"></div>

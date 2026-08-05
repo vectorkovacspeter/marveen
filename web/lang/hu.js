@@ -922,6 +922,24 @@ window._i18n.hu = {
   'status.comp.major_outage':    'kimaradás',
   'status.comp.maintenance':     'karbantartás',
 
+  // --- Flotta killswitch (soft/hard szüneteltetés) ---
+  'fleet.pause.banner':          'A flotta szüneteltetve',
+  'fleet.pause.mode.soft':       'soft',
+  'fleet.pause.mode.hard':       'hard',
+  'fleet.pause.resume':          'Folytatás',
+  'fleet.control.title':         'Flotta vezérlés',
+  'fleet.control.state.running': 'Fut',
+  'fleet.control.state.paused':  'Szüneteltetve ({mode})',
+  'fleet.control.pause_soft':    'Szüneteltetés (soft)',
+  'fleet.control.pause_hard':    'Leállítás (hard)',
+  'fleet.control.confirm_hard':  'A kemény leállítás a futó munkameneteket is megszakítja. Folytatod?',
+  'fleet.control.since':         'ekkor: {at}',
+  'fleet.control.by':            'ki: {by}',
+  'fleet.toast.paused_soft':     'A flotta szüneteltetve (soft): nem indul új munka.',
+  'fleet.toast.paused_hard':     'A flotta leállítva (hard): a futó munkamenetek megszakítva.',
+  'fleet.toast.resumed':         'A flotta folytatja a működést.',
+  'fleet.toast.error':           'A flotta-művelet nem sikerült.',
+
   // --- Beépített repók dashboard (card 000ec0d0) ---
   'repos.page_title':            'Beépített repók',
   'repos.page_subtitle':         'Adoptált külső GitHub-repók (skillek, MCP szerverek, eszközök) egy helyen',

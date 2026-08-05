@@ -5330,6 +5330,51 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--text-muted);
 }
 
+/* Fleet killswitch control card on the Status page. Matches the dashboard
+   panel look; reuses --warning accents when paused (set via .is-paused). */
+.fleet-control-card {
+  margin-bottom: 28px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg, var(--bg-elevated, transparent));
+}
+.fleet-control-card h3 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+.fleet-control-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+.fleet-control-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--success, #16a34a);
+  flex: 0 0 auto;
+}
+.fleet-control-card.is-paused .fleet-control-dot {
+  background: var(--warning, #d97706);
+}
+.fleet-control-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.fleet-control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .status-services {
   margin-bottom: 28px;
 }
@@ -8137,6 +8182,28 @@ body {
    screen even when initAuthBanner()/the dismiss button set el.hidden = true,
    making the close button look dead. Same fix as .kanban-board[hidden] etc. */
 .auth-setup-banner[hidden] { display: none; }
+
+/* Fleet killswitch: global "fleet paused" banner. Reuses the .auth-setup-banner
+   layout but with a warning accent. The [hidden] override is REQUIRED because
+   the shared .auth-setup-banner `display: flex` is an author rule that would
+   otherwise beat the UA's [hidden] { display: none } (same fix as
+   .auth-setup-banner[hidden] / .branch-drift-banner[hidden]). */
+.fleet-pause-banner {
+  border-left-color: var(--warning, #d97706);
+  background: var(--warning-soft, var(--accent-soft));
+}
+.fleet-pause-banner[hidden] { display: none; }
+.fleet-pause-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fleet-pause-banner-mode {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+}
 
 .auth-setup-banner-actions {
   display: flex;

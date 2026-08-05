@@ -10764,6 +10764,7 @@ const STATUS_COMPONENT_LABELS = {
 document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus)
 
 async function loadStatus() {
+  refreshFleetPauseState()
   const overallEl = document.getElementById('statusOverall')
   const gridEl = document.getElementById('statusServiceGrid')
   const listEl = document.getElementById('statusIncidentList')
@@ -10836,6 +10837,122 @@ async function loadStatus() {
   } catch (err) {
     overallEl.className = 'status-overall unknown'
     overallEl.textContent = 'Nem sikerult betolteni a statuszt'
+  }
+}
+
+// ============================================================
+// === Fleet killswitch (soft/hard pause of Claude-token use) ===
+// ============================================================
+// Global "fleet paused" banner (visible from any page) + a control card on the
+// Status page. Backed by /api/fleet/pause-state, /api/fleet/pause,
+// /api/fleet/resume (Bearer-gated; the window.fetch wrapper attaches the token).
+
+let fleetPauseState = { paused: false }
+
+function fleetModeLabel(mode) {
+  return mode === 'hard' ? t('fleet.pause.mode.hard') : t('fleet.pause.mode.soft')
+}
+
+// Toggle the global banner + fill the mode chip from the current state.
+function renderFleetBanner() {
+  const banner = document.getElementById('fleetPauseBanner')
+  if (!banner) return
+  const paused = !!fleetPauseState.paused
+  banner.hidden = !paused
+  const modeEl = document.getElementById('fleetPauseBannerMode')
+  if (modeEl) modeEl.textContent = paused ? `(${fleetModeLabel(fleetPauseState.mode)})` : ''
+}
+
+// Render the Fleet-control card body (state + action buttons) on the Status page.
+function renderFleetControl() {
+  const body = document.getElementById('fleetControlBody')
+  const card = document.getElementById('fleetControlCard')
+  if (!body) return
+  const paused = !!fleetPauseState.paused
+  if (card) card.classList.toggle('is-paused', paused)
+
+  const stateText = paused
+    ? t('fleet.control.state.paused', { mode: fleetModeLabel(fleetPauseState.mode) })
+    : t('fleet.control.state.running')
+
+  let metaHtml = ''
+  if (paused) {
+    const parts = []
+    if (fleetPauseState.at) {
+      const at = new Date(fleetPauseState.at).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
+      parts.push(t('fleet.control.since', { at: escapeHtml(at) }))
+    }
+    if (fleetPauseState.by) parts.push(t('fleet.control.by', { by: escapeHtml(String(fleetPauseState.by)) }))
+    if (parts.length) metaHtml = `<div class="fleet-control-meta">${parts.join(' &middot; ')}</div>`
+  }
+
+  let actionsHtml = ''
+  if (paused) {
+    actionsHtml = `<button class="btn-secondary btn-compact" id="fleetResumeBtn">${escapeHtml(t('fleet.pause.resume'))}</button>`
+  } else {
+    actionsHtml =
+      `<button class="btn-secondary btn-compact" id="fleetPauseSoftBtn">${escapeHtml(t('fleet.control.pause_soft'))}</button>` +
+      `<button class="btn-danger btn-compact" id="fleetPauseHardBtn">${escapeHtml(t('fleet.control.pause_hard'))}</button>`
+  }
+
+  body.innerHTML = `
+    <div class="fleet-control-state"><span class="fleet-control-dot"></span><span>${escapeHtml(stateText)}</span></div>
+    ${metaHtml}
+    <div class="fleet-control-actions">${actionsHtml}</div>
+  `
+
+  const softBtn = document.getElementById('fleetPauseSoftBtn')
+  const hardBtn = document.getElementById('fleetPauseHardBtn')
+  const resumeBtn = document.getElementById('fleetResumeBtn')
+  if (softBtn) softBtn.addEventListener('click', () => fleetPause('soft'))
+  if (hardBtn) hardBtn.addEventListener('click', () => {
+    if (confirm(t('fleet.control.confirm_hard'))) fleetPause('hard')
+  })
+  if (resumeBtn) resumeBtn.addEventListener('click', () => fleetResume())
+}
+
+// Fetch current pause-state and re-render both the banner and the card.
+async function refreshFleetPauseState() {
+  try {
+    const res = await fetch('/api/fleet/pause-state')
+    if (!res.ok) throw new Error('fetch failed')
+    fleetPauseState = await res.json()
+  } catch (err) {
+    // Leave the last known state in place; a transient failure must not
+    // wrongly claim the fleet is running (or hide an active pause banner).
+    console.error('Fleet pause-state betöltés hiba:', err)
+  }
+  renderFleetBanner()
+  renderFleetControl()
+}
+
+async function fleetPause(mode) {
+  try {
+    const res = await fetch('/api/fleet/pause', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+    if (!res.ok) throw new Error('pause failed')
+    fleetPauseState = await res.json()
+    renderFleetBanner()
+    renderFleetControl()
+    showToast(t(mode === 'hard' ? 'fleet.toast.paused_hard' : 'fleet.toast.paused_soft'))
+  } catch (err) {
+    showToast(t('fleet.toast.error'))
+  }
+}
+
+async function fleetResume() {
+  try {
+    const res = await fetch('/api/fleet/resume', { method: 'POST' })
+    if (!res.ok) throw new Error('resume failed')
+    fleetPauseState = await res.json()
+    renderFleetBanner()
+    renderFleetControl()
+    showToast(t('fleet.toast.resumed'))
+  } catch (err) {
+    showToast(t('fleet.toast.error'))
   }
 }
 
@@ -15014,7 +15131,17 @@ document.addEventListener('DOMContentLoaded', () => {
   wireAuthBanner()
   initAuthBanner()
   wireBranchDriftBanner()
+  wireFleetPauseBanner()
+  // Fleet killswitch: show the global "paused" banner from any page on load.
+  refreshFleetPauseState()
 })
+
+// Wire the global fleet-paused banner's Resume button (POST /api/fleet/resume,
+// then re-fetch state so both the banner and the Status card update).
+function wireFleetPauseBanner() {
+  const resumeBtn = document.getElementById('fleetPauseBannerResume')
+  if (resumeBtn) resumeBtn.addEventListener('click', () => fleetResume())
+}
 
 async function loadSettings() {
   const tabNav = document.getElementById('settingsTabNav')

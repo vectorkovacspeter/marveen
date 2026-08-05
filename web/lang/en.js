@@ -661,6 +661,24 @@ window._i18n.en = {
   'status.comp.major_outage':    'major outage',
   'status.comp.maintenance':     'under maintenance',
 
+  // --- Fleet killswitch (soft/hard pause) ---
+  'fleet.pause.banner':          'Fleet paused',
+  'fleet.pause.mode.soft':       'soft',
+  'fleet.pause.mode.hard':       'hard',
+  'fleet.pause.resume':          'Resume',
+  'fleet.control.title':         'Fleet control',
+  'fleet.control.state.running': 'Running',
+  'fleet.control.state.paused':  'Paused ({mode})',
+  'fleet.control.pause_soft':    'Pause (soft)',
+  'fleet.control.pause_hard':    'Stop (hard)',
+  'fleet.control.confirm_hard':  'Hard stop also terminates running sessions. Continue?',
+  'fleet.control.since':         'since {at}',
+  'fleet.control.by':            'by {by}',
+  'fleet.toast.paused_soft':     'Fleet paused (soft): no new work is started.',
+  'fleet.toast.paused_hard':     'Fleet stopped (hard): running sessions terminated.',
+  'fleet.toast.resumed':         'Fleet resumed.',
+  'fleet.toast.error':           'Fleet action failed.',
+
   // --- Built-in repos dashboard (card 000ec0d0) ---
   'repos.page_title':            'Built-in repos',
   'repos.page_subtitle':         'Adopted external GitHub repos (skills, MCP servers, tools) in one place',
