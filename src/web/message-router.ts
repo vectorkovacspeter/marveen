@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { resolveAgentChannelStateDir } from './voice-directive.js'
+import { isFleetPaused } from './fleet-pause.js'
 import {
   getPendingMessages,
   markMessageDelivered,
@@ -358,6 +359,7 @@ function batchDeliverBacklog(agent: string, agentPending: AgentMessage[], now: n
 // setInterval body so it can be exercised directly in unit tests (the
 // _tickRunning re-entrancy guard stays in startMessageRouter, around the call).
 export async function runMessageRouterTick(): Promise<void> {
+    if (isFleetPaused()) return   // Killswitch: stop poking the main agent while paused
     // Reset per-tick batched-message tracker.
     batchedMsgIdsThisTick = new Set()
     // Cap work per tick: process at most MAX_MESSAGES_PER_TICK messages, the

@@ -50,6 +50,7 @@ import { decideDownAgentAction, AGENT_MAX_RESTART_ATTEMPTS, parseEtimeToSeconds 
 // module so the standalone channel-coordinator reuses the exact same probe.
 import { getClaudePidForSession, hasChannelPluginAlive, probeChannelPluginLiveness } from '../channel-coordinator/liveness.js'
 import { getDesiredAgents } from './agent-desired-state.js'
+import { isFleetPaused } from './fleet-pause.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -1824,6 +1825,7 @@ function memGateAllowsStart(agentName: string): boolean {
 }
 
 async function reconcileDesiredAgents(): Promise<void> {
+  if (isFleetPaused()) return   // Killswitch: no respawns / new starts while paused
   if (reconcileBurstInProgress) return
   const desired = getDesiredAgents()
   if (desired.size === 0) return
