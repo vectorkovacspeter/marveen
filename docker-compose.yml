@@ -13,11 +13,25 @@ services:
     env_file:
       - .env.docker
     environment:
-      WEB_PORT: ${WEB_PORT:-3420}
+      # NOTE: the app reads its OWN config knobs (WEB_HOST, WEB_PORT,
+      # MAIN_AGENT_ID, ...) from the /app/.env FILE (src/env.ts readEnvFile),
+      # NOT from these process-env vars. So WEB_HOST etc. are set in the
+      # mounted .env.docker below (-> /app/.env), not here. These process-env
+      # vars are only for things read via process.env directly (the claude CLI
+      # token, OS timezone). WEB_HOST=0.0.0.0 in .env.docker is REQUIRED for the
+      # published port to be reachable from the host (app default 127.0.0.1 =
+      # container loopback only; the container network is isolated and /api/*
+      # stays behind the Bearer token gate).
       TZ: ${TZ:-Europe/Budapest}
     ports:
       - "${WEB_PORT:-3420}:${WEB_PORT:-3420}"
     volumes:
+      # The app reads its config from /app/.env (src/env.ts readEnvFile), which
+      # does NOT fall back to process.env -- so the env_file/environment values
+      # alone never reach config.ts. Mount .env.docker as /app/.env so WEB_HOST,
+      # WEB_PORT, MAIN_AGENT_ID, etc. actually take effect. Read-only: config is
+      # input; the fleet identity-mirror write path is not used in this setup.
+      - ./.env.docker:/app/.env:ro
       # Persistent runtime state (all gitignored, never baked into the image).
       # store/ contains the SQLite DB (store/claudeclaw.db), tokens and settings.
       - marveen-store:/app/store
