@@ -26,12 +26,14 @@ services:
     ports:
       - "${WEB_PORT:-3420}:${WEB_PORT:-3420}"
     volumes:
-      # The app reads its config from /app/.env (src/env.ts readEnvFile), which
-      # does NOT fall back to process.env -- so the env_file/environment values
-      # alone never reach config.ts. Mount .env.docker as /app/.env so WEB_HOST,
-      # WEB_PORT, MAIN_AGENT_ID, etc. actually take effect. Read-only: config is
-      # input; the fleet identity-mirror write path is not used in this setup.
-      - ./.env.docker:/app/.env:ro
+      # The app reads AND writes its config at /app/.env (src/env.ts). It does
+      # NOT fall back to process.env, so env_file/environment values alone never
+      # reach config.ts. Mount .env.docker as a read-only SEED; the entrypoint
+      # copies it to a writable /app/.env on boot (a single-file bind mount
+      # can't be written via the app's atomic-rename path). WEB_HOST, WEB_PORT,
+      # MAIN_AGENT_ID, etc. set in .env.docker thus take effect, and the
+      # dashboard onboarding/settings can persist changes to /app/.env.
+      - ./.env.docker:/app/.env.seed:ro
       # Persistent runtime state (all gitignored, never baked into the image).
       # store/ contains the SQLite DB (store/claudeclaw.db), tokens and settings.
       - marveen-store:/app/store

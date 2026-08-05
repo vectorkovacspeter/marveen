@@ -122,6 +122,10 @@ COPY --chown=node:node web        ./web
 COPY --chown=node:node templates  ./templates
 COPY --chown=node:node scripts    ./scripts
 COPY --chown=node:node seed-skills ./seed-skills
+# Entrypoint that seeds a writable /app/.env (the dashboard writes config there
+# via atomic rename, which a single-file bind mount can't support).
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 RUN mkdir -p store agents workspace reports .channels-config mcp-servers \
     && chown -R node:node /app
 
@@ -141,5 +145,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD curl -fsS "http://localhost:${WEB_PORT}/" >/dev/null 2>&1 || exit 1
 
 # tini reaps the tmux/claude child tree; the daemon is the main process.
-ENTRYPOINT ["tini", "--"]
+# The entrypoint seeds /app/.env (see docker-entrypoint.sh) then exec's the CMD.
+ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]
