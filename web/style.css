@@ -5332,20 +5332,75 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 
 /* Fleet killswitch control card on the Status page. Matches the dashboard
    panel look; reuses --warning accents when paused (set via .is-paused). */
-.fleet-control-card {
-  margin-bottom: 28px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--card-bg, var(--bg-elevated, transparent));
+/* --- Fleet kill-switch (system-wide, sidebar footer) --- */
+.fleet-killswitch {
+  margin-left: auto;   /* right-lock within the flex .sidebar-footer */
+  position: relative;  /* anchor for the popover */
 }
-.fleet-control-card h3 {
-  font-size: 13px;
+/* Red emergency-stop button: a raised round red dome. */
+.fleet-killswitch-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 34%, #ff5a52 0%, #e11d1d 56%, #a30f0f 100%);
+  box-shadow:
+    0 0 0 2px var(--bg-card),
+    0 0 0 3px #7a0b0b,
+    0 2px 4px rgba(0, 0, 0, 0.4),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.35),
+    inset 0 2px 3px rgba(255, 255, 255, 0.35);
+  transition: transform var(--transition), filter var(--transition);
+}
+.fleet-killswitch-btn:hover { filter: brightness(1.12); }
+.fleet-killswitch-btn:active { transform: translateY(1px); }
+.fleet-killswitch-ring {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+}
+/* Engaged (paused): the stop lights up + pulses. */
+.fleet-killswitch.is-paused .fleet-killswitch-btn {
+  animation: fleet-killswitch-pulse 1.4s ease-in-out infinite;
+}
+@keyframes fleet-killswitch-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 3px #7a0b0b, 0 0 6px 1px rgba(225, 29, 29, 0.6), inset 0 -2px 4px rgba(0, 0, 0, 0.35); }
+  50%      { box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 3px #7a0b0b, 0 0 13px 4px rgba(255, 60, 60, 0.9), inset 0 -2px 4px rgba(0, 0, 0, 0.35); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fleet-killswitch.is-paused .fleet-killswitch-btn {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 3px #7a0b0b, 0 0 11px 3px rgba(255, 60, 60, 0.85);
+  }
+}
+/* Popover opening upward from the footer button. */
+.fleet-killswitch-menu {
+  position: absolute;
+  bottom: 46px;
+  right: 0;
+  z-index: 50;
+  min-width: 210px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.fleet-killswitch-menu[hidden] { display: none; }
+.fleet-killswitch-title {
+  font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-muted);
-  margin: 0 0 12px;
+  margin-bottom: 10px;
 }
 .fleet-control-state {
   display: flex;
@@ -5361,7 +5416,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   background: var(--success, #16a34a);
   flex: 0 0 auto;
 }
-.fleet-control-card.is-paused .fleet-control-dot {
+.fleet-killswitch.is-paused .fleet-control-dot {
   background: var(--warning, #d97706);
 }
 .fleet-control-meta {

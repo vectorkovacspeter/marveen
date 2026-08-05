@@ -227,6 +227,14 @@
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
         </svg>
       </button>
+      <!-- System-wide fleet kill-switch: a right-locked red emergency-stop button.
+           Click opens the pause/resume popover (renderFleetControl); glows when paused. -->
+      <div class="fleet-killswitch" id="fleetKillswitch">
+        <button class="fleet-killswitch-btn" id="fleetKillswitchBtn" type="button" title="Flotta vezérlés" aria-haspopup="true" aria-expanded="false">
+          <span class="fleet-killswitch-ring"></span>
+        </button>
+        <div class="fleet-killswitch-menu" id="fleetKillswitchMenu" role="menu" hidden></div>
+      </div>
     </div>
   </aside>
 
@@ -1430,13 +1438,6 @@
             Frissítés
           </button>
         </div>
-      </div>
-
-      <!-- Fleet killswitch control card. Populated by renderFleetControl()
-           (called from loadStatus()). -->
-      <div class="fleet-control-card" id="fleetControlCard">
-        <h3 data-i18n="fleet.control.title">Flotta vezérlés</h3>
-        <div class="fleet-control-body" id="fleetControlBody"></div>
       </div>
 
       <div class="status-overall" id="statusOverall"></div>

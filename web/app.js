@@ -10863,13 +10863,20 @@ function renderFleetBanner() {
   if (modeEl) modeEl.textContent = paused ? `(${fleetModeLabel(fleetPauseState.mode)})` : ''
 }
 
-// Render the Fleet-control card body (state + action buttons) on the Status page.
+// Render the fleet kill-switch popover (state + action buttons) and reflect the
+// paused state on the sidebar kill-switch button (glow + tooltip).
 function renderFleetControl() {
-  const body = document.getElementById('fleetControlBody')
-  const card = document.getElementById('fleetControlCard')
-  if (!body) return
+  const menu = document.getElementById('fleetKillswitchMenu')
+  const wrap = document.getElementById('fleetKillswitch')
+  const btn = document.getElementById('fleetKillswitchBtn')
   const paused = !!fleetPauseState.paused
-  if (card) card.classList.toggle('is-paused', paused)
+  if (wrap) wrap.classList.toggle('is-paused', paused)
+  if (btn) {
+    btn.title = paused
+      ? t('fleet.control.state.paused', { mode: fleetModeLabel(fleetPauseState.mode) })
+      : t('fleet.control.title')
+  }
+  if (!menu) return
 
   const stateText = paused
     ? t('fleet.control.state.paused', { mode: fleetModeLabel(fleetPauseState.mode) })
@@ -10895,7 +10902,8 @@ function renderFleetControl() {
       `<button class="btn-danger btn-compact" id="fleetPauseHardBtn">${escapeHtml(t('fleet.control.pause_hard'))}</button>`
   }
 
-  body.innerHTML = `
+  menu.innerHTML = `
+    <div class="fleet-killswitch-title">${escapeHtml(t('fleet.control.title'))}</div>
     <div class="fleet-control-state"><span class="fleet-control-dot"></span><span>${escapeHtml(stateText)}</span></div>
     ${metaHtml}
     <div class="fleet-control-actions">${actionsHtml}</div>
@@ -10937,6 +10945,7 @@ async function fleetPause(mode) {
     fleetPauseState = await res.json()
     renderFleetBanner()
     renderFleetControl()
+    setFleetKillswitchOpen(false)
     showToast(t(mode === 'hard' ? 'fleet.toast.paused_hard' : 'fleet.toast.paused_soft'))
   } catch (err) {
     showToast(t('fleet.toast.error'))
@@ -10950,10 +10959,37 @@ async function fleetResume() {
     fleetPauseState = await res.json()
     renderFleetBanner()
     renderFleetControl()
+    setFleetKillswitchOpen(false)
     showToast(t('fleet.toast.resumed'))
   } catch (err) {
     showToast(t('fleet.toast.error'))
   }
+}
+
+// Sidebar kill-switch popover open/close (aria-synced).
+function setFleetKillswitchOpen(open) {
+  const menu = document.getElementById('fleetKillswitchMenu')
+  const btn = document.getElementById('fleetKillswitchBtn')
+  if (menu) menu.hidden = !open
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false')
+}
+
+// Wire the sidebar kill-switch button: toggle the popover; close on outside-click / Escape.
+function wireFleetKillswitch() {
+  const wrap = document.getElementById('fleetKillswitch')
+  const btn = document.getElementById('fleetKillswitchBtn')
+  if (!wrap || !btn) return
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    const menu = document.getElementById('fleetKillswitchMenu')
+    setFleetKillswitchOpen(menu ? menu.hidden : true)
+  })
+  document.addEventListener('click', (e) => {
+    if (!wrap.contains(e.target)) setFleetKillswitchOpen(false)
+  })
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') setFleetKillswitchOpen(false)
+  })
 }
 
 // ============================================================
@@ -15132,7 +15168,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initAuthBanner()
   wireBranchDriftBanner()
   wireFleetPauseBanner()
-  // Fleet killswitch: show the global "paused" banner from any page on load.
+  wireFleetKillswitch()
+  // Fleet killswitch: reflect state on the sidebar button + global banner on load.
   refreshFleetPauseState()
 })
 
