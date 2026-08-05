@@ -102,6 +102,23 @@ function mainAgentId() {
   return window._marveen?.agentId || 'marveen'
 }
 
+// Agents currently being run as SUBAGENTS inside the main agent's session (published to
+// store/active-subagents.json, served at /subagent-state.json). Their cards get
+// a blue running-ring instead of green, so it is clear the work runs in the main agent's
+// session, not a separate one. Refreshed on a light interval.
+let activeSubagents = new Set()
+async function refreshSubagents() {
+  try {
+    const r = await fetch('/subagent-state.json', { cache: 'no-store' })
+    if (r.ok) {
+      const arr = await r.json()
+      activeSubagents = new Set(Array.isArray(arr) ? arr.map(String) : [])
+    }
+  } catch { /* keep last known */ }
+}
+refreshSubagents()
+setInterval(refreshSubagents, 5000);
+
 (() => {
   const TOKEN_KEY = 'marveen-dashboard-token'
   const urlParams = new URLSearchParams(window.location.search)
@@ -763,7 +780,7 @@ function renderActivity(entries) {
       ? '<svg class="act-term-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" title="' + t('activity.tooltip.terminal') + '"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>'
       : ''
     return (
-      '<div class="activity-card ' + meta.cls + (canOpen ? ' act-clickable' : '') + '" data-agent="' + escapeHtml(a.name) + '">' +
+      '<div class="activity-card ' + meta.cls + (canOpen ? ' act-clickable' : '') + (a.running ? ' agent-card-running' : '') + (activeSubagents.has(a.name) ? ' agent-card-subagent' : '') + '" data-agent="' + escapeHtml(a.name) + '">' +
         '<div class="activity-card-head">' +
           '<span class="activity-name">' + escapeHtml(a.name) + mainBadge + '</span>' +
           '<span style="display:flex;align-items:center;gap:8px">' +
@@ -3244,7 +3261,7 @@ function renderAgents() {
     const mainModelLabel = m.model || 'opus'
     const mainModelClass = m.model || 'opus'
     const mCard = document.createElement('div')
-    mCard.className = 'agent-card marveen-card'
+    mCard.className = 'agent-card marveen-card agent-card-running'
     mCard.innerHTML = `
       <div class="agent-card-top">
         <div class="agent-avatar gradient-1"><img src="/api/marveen/avatar${avatarBust()}" alt="${escapeHtml(displayName)}"></div>
@@ -3300,6 +3317,9 @@ function renderAgents() {
     const isRunning = agent.running || false
     const runDotClass = isRunning ? 'running' : 'stopped'
     const runLabel = isRunning ? t('agents.status.running') : t('agents.status.stopped')
+    // Animated border for agents that are actively running. The class
+    // drives the CSS @keyframes in style.css (.agent-card-running).
+    if (isRunning) card.classList.add('agent-card-running')
 
     card.innerHTML = `
       <div class="agent-card-top">
