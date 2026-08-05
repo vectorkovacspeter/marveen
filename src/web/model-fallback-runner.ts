@@ -13,7 +13,6 @@ import {
   resolveModelId,
   DEFAULT_MODEL,
 } from './agent-config.js'
-import { isValidModelId, InvalidModelIdError } from '../model-id.js'
 import {
   agentRunState,
   agentSessionName,
