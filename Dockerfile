@@ -104,12 +104,13 @@ FROM base AS runtime
 #   sqlite3 - DB inspection/maintenance
 #   ffmpeg  - voice/audio (libopus) features
 #   curl, ca-certificates - HTTP, healthcheck, claude install
+#   procps (ps) - channel keepalive / poller-reap scans running processes
 #   tini    - PID 1 that reaps the tmux/child process tree
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       tini git tmux tar gawk python3 python3-venv sqlite3 ffmpeg \
-      curl ca-certificates \
+      curl ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 
 # App code + production dependencies, owned by the image's built-in non-root
