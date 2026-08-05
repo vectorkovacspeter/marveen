@@ -38,6 +38,34 @@ A Marveen saját licensze: [LICENSE](./LICENSE) (MIT).
 - **Forrás**: https://youtu.be/dtAJ2dOd3ko
 - **Hol a Marveen-ben**: a "purpose" argumentum mint kötelező paraméter a `/handoff`-on, és a cross-agent portable design (hogy egy HANDOFF.md működjön Claude Code, Codex, Copilot CLI stb. között) Matt videós design-javaslataiból átvéve.
 
+## Erről a forkról (`vectorkovacspeter/marveen`)
+
+Ez a repó a [`Szotasz/marveen`](https://github.com/Szotasz/marveen) **forkja** (a fenti attribúciók az
+upstream projektéi). A fork **válogatva** emeli át a nem-személyes, éles-minőségű változtatásokat a
+[`R4CK/mikrob`](https://github.com/R4CK/mikrob) forkból — a gép- és személy-specifikus részek (hardcode-olt
+útvonalak, tulajdonos-nevek, saját ágens-flotta) nélkül; a tulajdonos-értékek konfigurációba általánosítva.
+
+- **`R4CK/mikrob`** — az átemelt nem-személyes funkciók forrása. Fázisonként:
+  - **P1 biztonsági hardening** — modell-ID command-injection lezárása (allowlist + POSIX shell-escape minden
+    ágens-indítási ponton), egress-gate URL-userinfo bypass javítás, opt-in `git-protect`/`secret-write`/
+    `big-file` guard hookok. (Upstream **PR #866** — mergelve; **#867** Docker; **#874** guard hookok.)
+  - **P2 modell- és költség-kezelés** — model-catalog / model-fallback (hysteresis), costops heti hard-stop /
+    threshold / limit, local-LLM (Ollama offload) router + route, Gemini kliens/validáció, kanban-dispatch.
+  - **P3 dashboard UI** — kanban ügynök-gyorsszűrő chipek, running/subagent-ring, Beépített repók oldal,
+    Lokális LLM oldal, heti usage/threshold/model-tier widgetek, Gemini beállítás-fül.
+  - **P4 seed tartalom** — generikus szerep-personák (`seed-agents/`), skillek (`seed-skills/`), ütemezett
+    feladatok (`seed-scheduled-tasks/`) — személyes tartalom kiszűrve, tulajdonos-utalások placeholderre.
+  - **P5 store/ + ops-scriptek** — local-LLM store réteg és skill-sablonok, RAG/shared-memory hookok (unwired).
+  - **Docker** — multistage image + compose, token-biztos alapértelmezés (`RESPAWN_ENABLED=0` +
+    `MARVEEN_AGENT_BACKEND=sdk`).
+
+- **A fork saját, NEM átemelt munkája** (net-new, nem mikrob-eredetű): a **flotta-killswitch** (`/api/fleet/pause`
+  soft/hard + dashboard vezérlő), az upstream-szinkron konfliktus-feloldások, és a Docker onboarding/elérhetőség
+  javítások (írható `/app/.env` entrypoint, `WEB_HOST=0.0.0.0`).
+
+A rendszer eredeti szerzője **Szota Szabolcs**; a mikrob fork szerzőinek munkáját a fenti nem-személyes
+portolt részekért illeti köszönet.
+
 ---
 
 Ha hiányzó attribúciót észlelsz vagy korrekciót szeretnél, nyiss egy issue-t vagy PR-t: https://github.com/Szotasz/marveen.

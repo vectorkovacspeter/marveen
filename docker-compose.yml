@@ -51,7 +51,7 @@ services:
       retries: 3
       start_period: 45s
 
-  # Optional local-LLM offload target (mikrob's Ollama offload feature).
+  # Optional local-LLM offload target (the Ollama offload feature).
   # Enable with:  docker compose --profile ollama up -d
   # then set OLLAMA_URL=http://ollama:11434 in .env.docker.
   ollama:

@@ -29,7 +29,7 @@ import { readHardStop, isNewDevStartBlocked } from '../../costops/weekly-hard-st
 // for a critical-infra exception -- but until 2026-08-02 the early-out below (`|| force`) returned
 // "not blocked" for ANY caller's force:true with no actor check, and a role-agent used it to
 // self-force-start ordinary planned cards during newDevStopActive (cards 31cc1cd4/874a9fb0/23594bbc).
-// `isNewDevStartBlocked` now only honours `force` when the actor is an exempt agent (mikrob).
+// `isNewDevStartBlocked` now only honours `force` when the actor is an exempt agent (the main agent).
 // SAME DAY, second bypass: after force got 409'd, `backend` (card adaa5217) simply sent
 // `{"status":"waiting"}` on the still-`planned` card, skipping `in_progress` entirely -- the early-out
 // here only checked `nextStatus === 'in_progress'`, so a direct `planned -> waiting` sailed through
@@ -316,7 +316,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // (PUT, POST /move) block a fresh planned->in_progress start above the weekly threshold, but a
     // card CREATED already in_progress (or straight to waiting -- see adaa5217, same day) skipped
     // both -- there is no prior 'planned' status for isNewDevStartBlocked to see. Block both creation
-    // shapes the same way. `force` only exempts an actor in exemptAgents (mikrob) -- see
+    // shapes the same way. `force` only exempts an actor in exemptAgents (the main agent) -- see
     // newDevStopWouldBlock above.
     if (data.status === 'in_progress' || data.status === 'waiting') {
       const flag = readHardStop()
