@@ -72,9 +72,9 @@ describe('isValidCategoryName (path-traversal guard, card 18a0acb9)', () => {
 })
 
 describe('dashboard category-row escapes the meta interpolation (stored-XSS guard, card 18a0acb9)', () => {
-  // TODO(p3): the local-LLM category UI row is not yet ported into web/app.js (that is the P3
-  // web/app.js phase). Re-enable once the row lands; it pins the stored-XSS escape (card 18a0acb9).
-  it.skip('web/app.js interpolates ${escapeHtml(meta)}, never a bare ${meta}', () => {
+  // The local-LLM category UI row is ported into web/app.js (P3 cluster C); this pins the
+  // stored-XSS escape (card 18a0acb9) so a future edit reverting it fails CI.
+  it('web/app.js interpolates ${escapeHtml(meta)}, never a bare ${meta}', () => {
     const appJs = readFileSync(join(STORE_DIR, '..', 'web', 'app.js'), 'utf8')
     // The escaped form must be present...
     expect(appJs).toContain('llm-category-meta">${escapeHtml(meta)}')

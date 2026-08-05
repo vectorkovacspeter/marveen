@@ -181,6 +181,10 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>
             <span class="sb-label">Vault</span>
           </a>
+          <a href="#" class="sb-link" data-page="localLlm">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+            <span class="sb-label">Lokális LLM</span>
+          </a>
         </div>
       </div>
       <div class="sb-group" data-group="connections">
@@ -589,6 +593,195 @@
     </div>
 
     <!-- === Skills Detail Modal === -->
+
+    <!-- === Local LLM Page === -->
+    <div class="page" id="localLlmPage" hidden>
+      <div class="page-header">
+        <div class="page-header-row">
+          <div>
+            <h1 data-i18n="localLlm.page_title">Lokális LLM</h1>
+            <p class="subtitle" data-i18n="localLlm.page_subtitle">A helyi offload modell (Ollama a WSL GPU-n) vezérlése</p>
+          </div>
+          <button class="btn-secondary btn-compact" id="llmRefreshBtn" data-i18n="localLlm.btn.refresh">Frissítés</button>
+        </div>
+      </div>
+
+      <!-- Status -->
+      <div class="llm-section">
+        <h2 class="llm-section-title" data-i18n="localLlm.status.title">Állapot</h2>
+        <div class="llm-status-grid" id="llmStatusGrid">
+          <div class="llm-loading" data-i18n="common.loading">Betöltés...</div>
+        </div>
+      </div>
+
+      <!-- Offload aggressiveness slider (card 48f3b675) -->
+      <div class="llm-section">
+        <h2 class="llm-section-title" data-i18n="localLlm.offload.title">Offload agresszivitás</h2>
+        <p class="llm-offload-desc" data-i18n="localLlm.offload.desc">Mennyi mechanikus kód-részt adjunk ki a helyi GPU-nak. Magasabb érték = több offload, kevesebb Claude-token.</p>
+        <div class="llm-offload-row">
+          <input type="range" id="llmOffloadSlider" class="llm-offload-slider" min="0" max="100" step="1" value="50" aria-label="Offload agresszivitás (0-100)">
+          <output id="llmOffloadValue" class="llm-offload-value">50</output>
+        </div>
+        <div class="llm-offload-legend">
+          <span data-i18n="localLlm.offload.off">Ki (0)</span>
+          <button type="button" id="llmOffloadOptimalBtn" class="llm-offload-optimal-btn" title="A GPU alig terhelt -> ajánlott offload-szint">
+            <span data-i18n="localLlm.offload.optimal">Optimum</span>: <span id="llmOffloadOptimal">75</span>
+          </button>
+          <span data-i18n="localLlm.offload.max">Max (100)</span>
+        </div>
+        <div id="llmOffloadMsg" class="llm-offload-msg" role="status" aria-live="polite"></div>
+
+        <!-- Auto-ramp status (card 8b4ddcf0 tier-activation, backed by 346d3933's contract):
+             GET /api/local-llm/offload-config returns aggressivenessSource ('auto'|'manual') and
+             ramp {weeklyPct, newDevStop, floor, autoAggressiveness, autoDifficulty}. When on Auto,
+             the weekly quota drives the slider (leans toward 100 as the weekly limit nears); a
+             manual drag takes over until the operator hands control back. Contents rendered by
+             llmRenderRamp() in app.js; hidden/neutral when no live weekly reading exists. -->
+        <div id="llmOffloadRamp" class="llm-ramp" role="status" aria-live="polite" hidden>
+          <div class="llm-ramp-head">
+            <span id="llmRampSource" class="llm-ramp-source"></span>
+            <button type="button" id="llmRampAutoBtn" class="llm-ramp-auto-btn" hidden></button>
+          </div>
+          <p id="llmRampDetail" class="llm-ramp-detail"></p>
+          <p id="llmRampNumbers" class="llm-ramp-numbers" hidden></p>
+        </div>
+
+        <!-- Coding-difficulty threshold dropdown (card afcfe93e): the hardest coding task that may
+             still be drafted locally. Higher aggressiveness -> harder allowed. Only coding levels.
+             KEPT (not replaced by the slider): 346d3933 (now done) delivered the auto-aggressiveness
+             RAMP (the slider VALUE auto-tracks the weekly quota), not a per-category difficulty/
+             security tier-ORDERING that could drive per-category activation. So this dropdown still
+             owns the coding-difficulty control; the slider's auto behaviour is surfaced by the
+             ramp-status block above. -->
+        <div class="llm-offload-difficulty">
+          <label for="llmOffloadDifficulty" class="llm-offload-difficulty-label" data-i18n="localLlm.offload.difficulty.label">Kódolási nehézségi küszöb</label>
+          <p class="llm-offload-desc" data-i18n="localLlm.offload.difficulty.desc">Meddig terjedő nehézségű kódolási feladat adható ki a helyi modellnek. Magasabb küszöb = nehezebb feladatok is helyben.</p>
+          <select id="llmOffloadDifficulty" class="llm-offload-difficulty-select" aria-describedby="llmOffloadDifficultyHint llmOffloadDifficultyNote">
+            <option value="auto" data-i18n="localLlm.offload.difficulty.auto">Automatikus (a csúszkából)</option>
+            <option value="trivial" data-i18n="localLlm.offload.difficulty.trivial">Triviális — snippet / regex / formázás</option>
+            <option value="isolated" data-i18n="localLlm.offload.difficulty.isolated">Izolált — függvény / teszt / típus</option>
+            <option value="module" data-i18n="localLlm.offload.difficulty.module">Modul — több-függvényes (egy fájl)</option>
+          </select>
+          <p id="llmOffloadDifficultyHint" class="llm-offload-difficulty-hint" role="status" aria-live="polite"></p>
+          <p id="llmOffloadDifficultyNote" class="llm-offload-difficulty-note" data-i18n="localLlm.offload.difficulty.online_only">Feature (több-fájlos) és architektúra/wiring: mindig online (Claude) — a helyi 7B ezeket nem tudja megbízhatóan.</p>
+        </div>
+      </div>
+
+      <!-- Categories (card 0c054ebf, redesigned card 8b4ddcf0): all --task presets, not just the 4
+           coding-difficulty levels above. Sourced live from GET /api/local-llm/categories (backed by
+           store/local-llm-skills/*.txt on disk, never a hardcoded list). Per-category toggle
+           is real enforcement (store/local-llm.sh reads the same config before running any
+           --task), not decorative. Card 8b4ddcf0: compact tiles, description behind a
+           tap/click-friendly info-tooltip (not inline text -- works on touch/PWA, not just hover). -->
+      <div class="llm-section">
+        <h2 class="llm-section-title" data-i18n="localLlm.categories.title">Kategóriák</h2>
+        <p class="llm-offload-desc" data-i18n="localLlm.categories.desc">Az összes helyi-offload feladattípus, élőben a routerből -- nem csak a kódolási nehézség. Kikapcsolt kategória a dashboardról: az adott feladat innentől online (Claude) fut.</p>
+        <div id="llmCategoriesMsg" class="llm-offload-msg" role="status" aria-live="polite"></div>
+        <div class="llm-categories-list" id="llmCategoriesList">
+          <div class="llm-loading" data-i18n="common.loading">Betöltés...</div>
+        </div>
+      </div>
+
+      <!-- Usage metrics -->
+      <div class="llm-section">
+        <h2 class="llm-section-title" data-i18n="localLlm.usage.title">Használat</h2>
+        <div class="llm-status-grid" id="llmUsageTiles">
+          <div class="llm-loading" data-i18n="common.loading">Betöltés...</div>
+        </div>
+
+        <div class="llm-usage-cols">
+          <div class="llm-usage-block">
+            <h3 class="llm-usage-subtitle" data-i18n="localLlm.usage.by_agent">Ügynökök szerint</h3>
+            <div class="llm-usage-bars" id="llmUsageByCaller"></div>
+          </div>
+          <div class="llm-usage-block">
+            <h3 class="llm-usage-subtitle" data-i18n="localLlm.usage.by_source">Forrás és feladat szerint</h3>
+            <div id="llmUsageBySource"></div>
+          </div>
+        </div>
+
+        <div class="llm-usage-block">
+          <h3 class="llm-usage-subtitle" data-i18n="localLlm.usage.by_day">Utolsó 14 nap</h3>
+          <div class="llm-usage-daychart" id="llmUsageByDay"></div>
+        </div>
+
+        <div class="llm-usage-block">
+          <h3 class="llm-usage-subtitle" data-i18n="localLlm.usage.recent">Legutóbbi hívások</h3>
+          <div class="llm-usage-table-wrap" id="llmUsageRecent"></div>
+        </div>
+      </div>
+
+      <!-- Model swap -->
+      <div class="llm-section">
+        <h2 class="llm-section-title" data-i18n="localLlm.models.title">Modellek</h2>
+        <div class="llm-models" id="llmModels">
+          <div class="llm-loading" data-i18n="common.loading">Betöltés...</div>
+        </div>
+        <div class="llm-pull-row">
+          <input type="text" id="llmPullInput" class="llm-input" data-i18n-placeholder="localLlm.models.pull_placeholder" placeholder="pl. qwen2.5-coder:7b" autocomplete="off" spellcheck="false">
+          <button class="btn-primary btn-compact" id="llmPullBtn" data-i18n="localLlm.models.pull_btn">Letöltés</button>
+        </div>
+        <div class="llm-pull-progress" id="llmPullProgress" hidden></div>
+      </div>
+
+      <!-- Model recommendations + HuggingFace search -->
+      <div class="llm-section">
+        <h2 class="llm-section-title" data-i18n="localLlm.rec.title">Ajánlott modellek</h2>
+        <p class="llm-hint" data-i18n="localLlm.rec.hint">A legjobb kódmodellek erre a GPU-ra (GTX 1660 Ti, 6 GB VRAM). Az ~5 GB feletti modellek CPU-ra csúsznak és lassabbak.</p>
+        <div class="llm-recs" id="llmRecs">
+          <div class="llm-loading" data-i18n="common.loading">Betöltés...</div>
+        </div>
+
+        <h3 class="llm-usage-subtitle llm-hf-title" data-i18n="localLlm.hf.title">HuggingFace keresés</h3>
+        <p class="llm-hint" data-i18n="localLlm.hf.hint">Keress GGUF kódmodelleket a HuggingFace-en; a GGUF találatok közvetlenül húzhatók Ollamába.</p>
+        <div class="llm-hf-filters">
+          <input type="text" id="llmHfQuery" class="llm-input" data-i18n-placeholder="localLlm.hf.query_placeholder" placeholder="Keresés (pl. qwen coder, deepseek)" autocomplete="off" spellcheck="false" maxlength="80">
+          <select id="llmHfTask" class="llm-select" data-i18n-aria-label="localLlm.hf.task_label" aria-label="Feladat">
+            <option value="text-generation" data-i18n="localLlm.hf.task_codegen">Szöveggenerálás (kód)</option>
+            <option value="" data-i18n="localLlm.hf.task_any">Bármely</option>
+          </select>
+          <select id="llmHfSort" class="llm-select" data-i18n-aria-label="localLlm.hf.sort_label" aria-label="Rendezés">
+            <option value="downloads" data-i18n="localLlm.hf.sort_downloads">Letöltések</option>
+            <option value="likes" data-i18n="localLlm.hf.sort_likes">Kedvelések</option>
+            <option value="trending" data-i18n="localLlm.hf.sort_trending">Trending</option>
+            <option value="lastModified" data-i18n="localLlm.hf.sort_recent">Legutóbbi</option>
+          </select>
+          <label class="llm-hf-toggle">
+            <input type="checkbox" id="llmHfGguf" checked>
+            <span data-i18n="localLlm.hf.gguf_only">Csak GGUF (Ollama húzható)</span>
+          </label>
+          <button class="btn-primary btn-compact" id="llmHfSearchBtn" data-i18n="localLlm.hf.search_btn">Szűrés indítása</button>
+        </div>
+        <div class="llm-hf-results" id="llmHfResults">
+          <div class="llm-empty" data-i18n="localLlm.hf.initial">Indíts egy keresést a fenti szűrőkkel.</div>
+        </div>
+      </div>
+
+      <!-- Quick test -->
+      <div class="llm-section">
+        <h2 class="llm-section-title" data-i18n="localLlm.test.title">Gyorsteszt</h2>
+        <p class="llm-hint" data-i18n="localLlm.test.hint">Próbáld ki a helyi modellt a RAG wrapperen keresztül (a fő ügynök memóriájával).</p>
+        <textarea id="llmTestPrompt" class="llm-textarea" rows="3" data-i18n-placeholder="localLlm.test.placeholder" placeholder="Írj egy promptot..." maxlength="4000"></textarea>
+        <div class="llm-test-row">
+          <button class="btn-primary btn-compact" id="llmTestBtn" data-i18n="localLlm.test.run_btn">Futtatás</button>
+          <span class="llm-charcount" id="llmTestCount"></span>
+        </div>
+        <div class="llm-test-output" id="llmTestOutput" hidden></div>
+      </div>
+
+      <!-- Terminal / logs + running -->
+      <div class="llm-section">
+        <div class="llm-logs-header">
+          <h2 class="llm-section-title" data-i18n="localLlm.logs.title">Terminál és futó feladatok</h2>
+          <div class="llm-log-tabs" role="tablist">
+            <button class="llm-log-tab active" data-source="bridge" data-i18n="localLlm.logs.bridge">Quota-bridge</button>
+            <button class="llm-log-tab" data-source="ollama" data-i18n="localLlm.logs.ollama">Ollama</button>
+          </div>
+        </div>
+        <div class="llm-running" id="llmRunning"></div>
+        <pre class="llm-terminal" id="llmTerminal"><span class="llm-muted" data-i18n="common.loading">Betöltés...</span></pre>
+      </div>
+    </div>
 
     <!-- === Memories Page === -->
     <div class="page" id="memoriesPage" hidden>

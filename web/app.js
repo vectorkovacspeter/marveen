@@ -391,6 +391,8 @@ function switchPage(pageId) {
   if (pageId === 'agents') { loadAgents().then(() => _setAgentsView(_agentsActiveView || 'grid')); startAgentsBusyPoll() }
   if (pageId === 'memories') { loadMemAgents(); loadMemStats(); loadMemories() }
   if (pageId === 'skills') loadGlobalSkills()
+  if (pageId !== 'localLlm') stopLocalLlmPoll()
+  if (pageId === 'localLlm') loadLocalLlm()
   if (pageId === 'connectors') loadConnectors()
   if (pageId === 'migrate') loadMigrateAgents()
   if (pageId === 'docs') loadDocs()
@@ -452,7 +454,7 @@ const SIDEBAR_GROUPS = [
   { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'messages', 'tasks', 'bgTasks'] },
   { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
   { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs', 'tokenUsage'] },
-  { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'repos', 'settings', 'vault'] },
+  { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'repos', 'settings', 'vault', 'localLlm'] },
   { key: 'connections', labelKey: 'nav.group.connections', pages: ['connectors', 'federation', 'migrate'] },
 ]
 const sidebarGroupEls = document.querySelectorAll('.sb-group[data-group]')
@@ -526,7 +528,7 @@ const NAV_I18N = {
   agents: 'nav.agents', activity: 'nav.activity', team: 'nav.team',
   messages: 'nav.messages', tasks: 'nav.tasks', memories: 'nav.memories',
   recall: 'nav.recall', naplo: 'nav.recall', bgTasks: 'nav.bgTasks',
-  skills: 'nav.skills', connectors: 'nav.connectors', migrate: 'nav.migrate',
+  skills: 'nav.skills', localLlm: 'nav.localLlm', connectors: 'nav.connectors', migrate: 'nav.migrate',
   approvals: 'nav.approvals',
   docs: 'nav.docs', research: 'nav.research', status: 'nav.status',
   settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
@@ -571,6 +573,7 @@ const PAGE_HEADER_I18N = {
   settingsPage:   { title: 'settings.page_title',    sub: 'settings.page_subtitle' },
   ideasPage:      { title: 'ideas.page_title',       sub: 'ideas.page_subtitle' },
   vaultPage:      { title: 'vault.page_title',       sub: 'vault.page_subtitle' },
+  localLlmPage:   { title: 'localLlm.page_title',    sub: 'localLlm.page_subtitle' },
   tokenUsagePage: { title: 'tokenUsage.page_title',  sub: 'tokenUsage.page_subtitle' },
   updatesPage:    { title: 'updates.page_title',     sub: null },
   naploPage:      { title: 'naplo.page_title',       sub: 'naplo.page_subtitle' },
@@ -9947,6 +9950,803 @@ function escapeHtml(str) {
   // attributes, where a surviving " would allow an attribute breakout.
   return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
+
+// ============================================================
+// === Local LLM (Ollama offload) page ===
+// ============================================================
+
+let _llmPollTimer = null
+let _llmLogSource = 'bridge'
+let _llmPullTimer = null
+
+function stopLocalLlmPoll() {
+  if (_llmPollTimer) { clearInterval(_llmPollTimer); _llmPollTimer = null }
+}
+
+function fmtBytes(n) {
+  if (!n || n <= 0) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0, v = n
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${u[i]}`
+}
+
+let _llmOffloadBound = false
+let _llmOffloadTimer = null
+
+function llmOffloadMsg(text, cls) {
+  const m = document.getElementById('llmOffloadMsg')
+  if (!m) return
+  m.textContent = text || ''
+  m.className = 'llm-offload-msg' + (cls ? ' ' + cls : '')
+}
+
+async function llmPostOffload(value) {
+  try {
+    const res = await fetch('/api/local-llm/offload-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aggressiveness: value }),
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const d = await res.json()
+    // The threshold may follow the slider (when on "auto"); refresh the dropdown hint too.
+    llmRenderDifficulty(d)
+    // A manual drag flips the source to 'manual' -- reflect that + offer "back to Auto".
+    llmRenderRamp(d)
+    llmOffloadMsg(t('localLlm.offload.saved', { value: d.aggressiveness }), 'ok')
+  } catch (e) {
+    // Rule 12: speak the failure in the flow (not a silent no-op) with a retry-able message.
+    llmOffloadMsg(t('localLlm.offload.save_error'), 'bad')
+  }
+}
+
+// Render the coding-difficulty dropdown + hint from an offload-config response (card afcfe93e).
+// When the operator has not picked an explicit level, the select shows "auto" and the hint states
+// the level DERIVED from the slider. Levels beyond the 7B's reliable ceiling get a caution note.
+function llmRenderDifficulty(d) {
+  const sel = document.getElementById('llmOffloadDifficulty')
+  const hint = document.getElementById('llmOffloadDifficultyHint')
+  if (!sel || !d) return
+  // The threshold is capped at the reliable ceiling (module), so it is always a selectable option.
+  sel.value = d.codingDifficultyExplicit ? String(d.codingDifficultyThreshold) : 'auto'
+  if (!hint) return
+  const eff = String(d.codingDifficultyThreshold || '')
+  const label = t('localLlm.offload.difficulty.level.' + eff) || eff
+  hint.textContent = d.codingDifficultyExplicit
+    ? t('localLlm.offload.difficulty.hint_explicit', { level: label })
+    : t('localLlm.offload.difficulty.hint_auto', { level: label })
+}
+
+// Render the auto-ramp status (card 8b4ddcf0, 346d3933 contract): whether the slider is under
+// automatic (weekly-quota-driven) or manual control, the live weekly %/auto value when known, and
+// a "back to Auto" action once the operator has taken manual control. Degrades gracefully when the
+// backend predates 346d3933 and returns no `aggressivenessSource`/`ramp` (stale dist): the whole
+// block simply stays hidden rather than showing a broken/empty shell.
+function llmRenderRamp(d) {
+  const box = document.getElementById('llmOffloadRamp')
+  const srcEl = document.getElementById('llmRampSource')
+  const detailEl = document.getElementById('llmRampDetail')
+  const numbersEl = document.getElementById('llmRampNumbers')
+  const autoBtn = document.getElementById('llmRampAutoBtn')
+  if (!box || !srcEl || !detailEl || !numbersEl || !autoBtn) return
+
+  // No contract from this backend (pre-346d3933 build) -> nothing honest to show; hide the block.
+  if (d.aggressivenessSource == null && d.ramp == null) {
+    box.hidden = true
+    return
+  }
+  box.hidden = false
+
+  const source = d.aggressivenessSource === 'manual' ? 'manual' : 'auto'
+
+  srcEl.textContent =
+    source === 'auto'
+      ? t('localLlm.offload.ramp.source_auto')
+      : t('localLlm.offload.ramp.source_manual')
+  srcEl.className = 'llm-ramp-source llm-ramp-source--' + source
+
+  // Contract (card e93a1dff): `ramp` is null when there is no live weekly reading; when present it
+  // is { active, weeklyPercent, newDevStop, current, target, reason } where `reason` is an i18n KEY
+  // the backend chose for the current state (manual | atThreshold | ramping | floor). We render the
+  // BE's reason key -- not our own restated logic -- so the explanation stays server-authoritative.
+  const ramp = d.ramp
+  if (ramp && typeof ramp.reason === 'string') {
+    const nums = {
+      weekly: typeof ramp.weeklyPercent === 'number' ? Math.round(ramp.weeklyPercent) : '?',
+      threshold: typeof ramp.newDevStop === 'number' ? Math.round(ramp.newDevStop) : '?',
+      target: typeof ramp.target === 'number' ? Math.round(ramp.target) : '?',
+      current: typeof ramp.current === 'number' ? Math.round(ramp.current) : '?',
+    }
+    // Reason line: the BE's own i18n key for the state (server-authoritative, qualitative).
+    detailEl.textContent = t(ramp.reason, nums)
+    detailEl.hidden = false
+    // Numbers line: the quantitative state the contract carries (weekly% / threshold / target /
+    // current) -- shows the operator BY HOW MUCH, which the reason sentence alone doesn't.
+    numbersEl.textContent = t('localLlm.offload.ramp.numbers', nums)
+    numbersEl.hidden = false
+  } else {
+    // ramp === null: source is known but no live weekly reading yet (empty state, rule 12) -- say so
+    // plainly rather than implying a value we do not have.
+    detailEl.textContent = t('localLlm.offload.ramp.no_reading')
+    detailEl.hidden = false
+    numbersEl.textContent = ''
+    numbersEl.hidden = true
+  }
+
+  // "Back to Auto" only makes sense in manual mode; offer it whenever the operator has taken over.
+  if (source === 'manual') {
+    autoBtn.hidden = false
+    autoBtn.textContent = t('localLlm.offload.ramp.back_to_auto')
+  } else {
+    autoBtn.hidden = true
+  }
+}
+
+async function llmLoadOffload() {
+  const slider = document.getElementById('llmOffloadSlider')
+  const out = document.getElementById('llmOffloadValue')
+  const opt = document.getElementById('llmOffloadOptimal')
+  if (!slider) return
+  try {
+    const res = await fetch('/api/local-llm/offload-config')
+    const d = await res.json()
+    slider.value = String(d.aggressiveness)
+    if (out) out.textContent = String(d.aggressiveness)
+    if (opt) opt.textContent = String(d.optimal)
+    slider.dataset.optimal = String(d.optimal)
+    llmRenderDifficulty(d)
+    llmRenderRamp(d)
+    llmOffloadMsg('')
+  } catch (e) {
+    llmOffloadMsg(t('localLlm.offload.load_error'), 'bad')
+  }
+}
+
+// Hand control back to the weekly auto-ramp (POST {aggressiveness:'auto'} -> clears the manual flag).
+async function llmBackToAuto() {
+  try {
+    const res = await fetch('/api/local-llm/offload-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aggressiveness: 'auto' }),
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    // Re-load so the slider value, source badge, and ramp detail all reflect the resumed auto value.
+    await llmLoadOffload()
+    llmOffloadMsg(t('localLlm.offload.ramp.back_to_auto_done'), 'ok')
+  } catch (e) {
+    llmOffloadMsg(t('localLlm.offload.save_error'), 'bad')
+  }
+}
+
+// Persist the coding-difficulty threshold ('auto' clears the explicit override -> follows slider).
+async function llmPostDifficulty(value) {
+  try {
+    const res = await fetch('/api/local-llm/offload-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codingDifficultyThreshold: value }),
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const d = await res.json()
+    llmRenderDifficulty(d)
+    const eff = t('localLlm.offload.difficulty.level.' + String(d.codingDifficultyThreshold)) || d.codingDifficultyThreshold
+    llmOffloadMsg(t('localLlm.offload.difficulty.saved', { level: eff }), 'ok')
+  } catch (e) {
+    // Rule 12: speak the failure in the flow with a retry-able message.
+    llmOffloadMsg(t('localLlm.offload.save_error'), 'bad')
+  }
+}
+
+function llmSetupOffload() {
+  const slider = document.getElementById('llmOffloadSlider')
+  const out = document.getElementById('llmOffloadValue')
+  if (slider && !_llmOffloadBound) {
+    _llmOffloadBound = true
+    slider.addEventListener('input', () => {
+      if (out) out.textContent = slider.value
+    })
+    slider.addEventListener('change', () => {
+      if (_llmOffloadTimer) clearTimeout(_llmOffloadTimer)
+      _llmOffloadTimer = setTimeout(() => llmPostOffload(Number(slider.value)), 150)
+    })
+    const optBtn = document.getElementById('llmOffloadOptimalBtn')
+    if (optBtn) {
+      optBtn.addEventListener('click', () => {
+        const optimal = Number(slider.dataset.optimal || '75')
+        slider.value = String(optimal)
+        if (out) out.textContent = String(optimal)
+        llmPostOffload(optimal)
+      })
+    }
+    const diffSel = document.getElementById('llmOffloadDifficulty')
+    if (diffSel) {
+      diffSel.addEventListener('change', () => llmPostDifficulty(diffSel.value))
+    }
+    const autoBtn = document.getElementById('llmRampAutoBtn')
+    if (autoBtn) {
+      autoBtn.addEventListener('click', () => llmBackToAuto())
+    }
+  }
+  llmLoadOffload()
+}
+
+async function loadLocalLlm() {
+  await llmRefreshStatus()
+  await llmRefreshRecs()
+  await llmRefreshLogs()
+  await llmRefreshUsage()
+  await llmRefreshCategories()
+  llmSetupOffload()
+  stopLocalLlmPoll()
+  // Live refresh of status + terminal + usage while the page is open.
+  _llmPollTimer = setInterval(() => {
+    if (document.getElementById('localLlmPage').hidden) { stopLocalLlmPoll(); return }
+    llmRefreshStatus()
+    llmRefreshLogs()
+    llmRefreshUsage()
+  }, 5000)
+}
+
+function llmCategoriesMsg(text, cls) {
+  const m = document.getElementById('llmCategoriesMsg')
+  if (!m) return
+  m.textContent = text || ''
+  m.className = 'llm-offload-msg' + (cls ? ' ' + cls : '')
+}
+
+// Categories (card 0c054ebf): all --task presets from GET /api/local-llm/categories, sourced
+// on the backend from store/local-llm-skills/*.txt (never a hardcoded UI list). Each row shows
+// name, description, call count, last-used, and a real enable/disable toggle -- store/local-llm.sh
+// reads the same disabledCategories config before running any --task, so this is not decorative.
+async function llmRefreshCategories() {
+  const listEl = document.getElementById('llmCategoriesList')
+  if (!listEl) return
+  try {
+    const res = await fetch('/api/local-llm/categories')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const d = await res.json()
+    const categories = Array.isArray(d.categories) ? d.categories : []
+    if (categories.length === 0) {
+      listEl.innerHTML = `<div class="llm-empty">${t('localLlm.categories.empty')}</div>`
+      return
+    }
+    listEl.innerHTML = categories.map((c, i) => {
+      const meta = c.count > 0
+        ? t('localLlm.categories.meta_used', { count: c.count, when: llmFmtTime(c.lastTs) })
+        : t('localLlm.categories.meta_unused')
+      const tipId = `llmCatTip${i}`
+      return `<div class="llm-category-row${c.enabled ? '' : ' disabled'}">
+        <div class="llm-category-info">
+          <span class="llm-category-name">${escapeHtml(c.name)}</span>
+          <button type="button" class="llm-category-info-btn" data-tip="${tipId}" aria-expanded="false" aria-describedby="${tipId}" aria-label="${escapeHtml(t('localLlm.categories.infoAria', { task: c.name }))}">&#9432;</button>
+        </div>
+        <div class="llm-category-tooltip" id="${tipId}" role="tooltip" hidden>${escapeHtml(c.description)}</div>
+        <span class="llm-category-meta">${escapeHtml(meta)}</span>
+        <button type="button" class="llm-category-toggle${c.enabled ? ' on' : ' off'}" data-task="${escapeHtml(c.name)}" data-enabled="${c.enabled ? '1' : '0'}" aria-pressed="${c.enabled ? 'true' : 'false'}">
+          ${c.enabled ? t('localLlm.categories.on') : t('localLlm.categories.off')}
+        </button>
+      </div>`
+    }).join('')
+    listEl.querySelectorAll('.llm-category-toggle').forEach(btn =>
+      btn.addEventListener('click', () => llmToggleCategory(btn.dataset.task, btn.dataset.enabled !== '1')))
+    // Tap/click-to-open info tooltip (card 8b4ddcf0): hover alone would be invisible on touch/PWA.
+    // Only one open at a time; closes on a second click, an outside click, or Escape.
+    listEl.querySelectorAll('.llm-category-info-btn').forEach(btn =>
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const tip = document.getElementById(btn.dataset.tip)
+        const opening = tip.hidden
+        listEl.querySelectorAll('.llm-category-tooltip').forEach(t => { t.hidden = true })
+        listEl.querySelectorAll('.llm-category-info-btn').forEach(b => b.setAttribute('aria-expanded', 'false'))
+        if (opening) {
+          tip.hidden = false
+          btn.setAttribute('aria-expanded', 'true')
+        }
+      }))
+    llmCategoriesMsg('')
+  } catch (err) {
+    // Rule 12: speak the failure honestly, no raw status code -- llmRefreshBtn re-fetches.
+    listEl.innerHTML = `<div class="llm-empty">${t('localLlm.load_error')}</div>`
+  }
+}
+
+async function llmToggleCategory(task, enabled) {
+  try {
+    const res = await fetch('/api/local-llm/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, enabled }),
+    })
+    const d = await res.json()
+    if (!res.ok) throw new Error(d.message || ('HTTP ' + res.status))
+    await llmRefreshCategories()
+    llmCategoriesMsg(enabled ? t('localLlm.categories.enabled_msg', { task }) : t('localLlm.categories.disabled_msg', { task }), 'ok')
+  } catch (err) {
+    llmCategoriesMsg(t('localLlm.categories.save_error'), 'bad')
+  }
+}
+
+async function llmRefreshStatus() {
+  const grid = document.getElementById('llmStatusGrid')
+  const modelsEl = document.getElementById('llmModels')
+  const runningEl = document.getElementById('llmRunning')
+  try {
+    const res = await fetch('/api/local-llm/status')
+    const d = await res.json()
+
+    // Status tiles
+    const tiles = []
+    tiles.push(llmTile(
+      t('localLlm.status.ollama'),
+      d.ollama_up ? t('localLlm.status.up') : t('localLlm.status.down'),
+      d.ollama_up ? 'ok' : 'bad',
+    ))
+    // Code/offload model tile (qwen2.5-coder or whatever is active)
+    const codeRunning = (Array.isArray(d.running) ? d.running : []).find(r => r.name === d.active_model || r.model === d.active_model)
+    tiles.push(llmTile(
+      t('localLlm.status.code_model'),
+      d.active_model ? escapeHtml(d.active_model) : '—',
+      d.active_model ? (d.active_present ? 'ok' : 'warn') : 'muted',
+      d.active_model && !d.active_present
+        ? t('localLlm.status.not_pulled')
+        : (codeRunning ? t('localLlm.status.in_vram') : (d.active_model ? t('localLlm.status.not_in_vram') : '')),
+      t('localLlm.status.code_model_role'),
+    ))
+    // Embedding model tile (nomic-embed-text — memory/RAG only, never gets code tasks)
+    const embedRunning = (Array.isArray(d.running) ? d.running : []).find(r => r.name === d.embed_model || r.model === d.embed_model)
+    tiles.push(llmTile(
+      t('localLlm.status.embed_model'),
+      d.embed_model ? escapeHtml(d.embed_model) : '—',
+      d.embed_model ? (d.embed_present ? 'ok' : 'warn') : 'muted',
+      d.embed_model && !d.embed_present
+        ? t('localLlm.status.not_pulled')
+        : (embedRunning ? t('localLlm.status.in_vram') : (d.embed_model ? t('localLlm.status.not_in_vram') : '')),
+      t('localLlm.status.embed_model_role'),
+    ))
+    tiles.push(llmTile(
+      t('localLlm.status.bridge'),
+      d.bridge_active ? t('localLlm.status.running') : t('localLlm.status.stopped'),
+      d.bridge_active ? 'ok' : 'muted',
+    ))
+    if (d.gpu) {
+      const used = d.gpu.mem_total_mb ? `${d.gpu.mem_used_mb} / ${d.gpu.mem_total_mb} MB` : `${d.gpu.mem_used_mb} MB`
+      tiles.push(llmTile(
+        `${t('localLlm.status.gpu')} · ${escapeHtml(d.gpu.name)}`,
+        `${used} · ${d.gpu.util_pct}%`,
+        'ok',
+      ))
+    } else {
+      tiles.push(llmTile(t('localLlm.status.gpu'), t('localLlm.status.no_gpu'), 'muted'))
+    }
+    grid.innerHTML = tiles.join('')
+
+    // Models list
+    const models = Array.isArray(d.models) ? d.models : []
+    if (!d.ollama_up) {
+      modelsEl.innerHTML = `<div class="llm-empty">${t('localLlm.status.down')}</div>`
+    } else if (models.length === 0) {
+      modelsEl.innerHTML = `<div class="llm-empty">${t('localLlm.models.empty')}</div>`
+    } else {
+      modelsEl.innerHTML = models.map(m => {
+        const active = m.name === d.active_model
+        return `<div class="llm-model-row${active ? ' active' : ''}">
+          <div class="llm-model-info">
+            <span class="llm-model-name">${escapeHtml(m.name)}</span>
+            <span class="llm-model-size">${fmtBytes(m.size)}</span>
+          </div>
+          <div class="llm-model-actions">
+            ${active
+              ? `<span class="llm-badge-active">${t('localLlm.models.active')}</span>`
+              : `<button class="btn-secondary btn-compact llm-use-btn" data-model="${escapeHtml(m.name)}">${t('localLlm.models.use')}</button>`}
+            <button class="btn-secondary btn-compact llm-update-btn" data-model="${escapeHtml(m.name)}">${t('localLlm.models.update')}</button>
+          </div>
+        </div>`
+      }).join('')
+      modelsEl.querySelectorAll('.llm-use-btn').forEach(b =>
+        b.addEventListener('click', () => llmSwapModel(b.dataset.model)))
+      modelsEl.querySelectorAll('.llm-update-btn').forEach(b =>
+        b.addEventListener('click', () => { document.getElementById('llmPullInput').value = b.dataset.model; llmStartPull(b.dataset.model) }))
+    }
+
+    // Running generations
+    const running = Array.isArray(d.running) ? d.running : []
+    if (running.length === 0) {
+      runningEl.innerHTML = `<div class="llm-running-empty">${t('localLlm.running.none')}</div>`
+    } else {
+      runningEl.innerHTML = running.map(r => {
+        const vram = r.size_vram ? ` · ${t('localLlm.running.vram')}: ${fmtBytes(r.size_vram)}` : ''
+        return `<div class="llm-running-row"><span class="llm-run-dot"></span><span class="llm-model-name">${escapeHtml(r.name || r.model || '?')}</span><span class="llm-model-size">${fmtBytes(r.size)}${vram}</span></div>`
+      }).join('')
+    }
+  } catch (err) {
+    grid.innerHTML = `<div class="llm-empty">${t('localLlm.load_error')}</div>`
+  }
+}
+
+function llmTile(label, value, kind, note, role) {
+  return `<div class="llm-tile ${kind}">
+    <div class="llm-tile-label">${label}</div>
+    <div class="llm-tile-value">${value}</div>
+    ${note ? `<div class="llm-tile-note">${note}</div>` : ''}
+    ${role ? `<div class="llm-tile-role">${role}</div>` : ''}
+  </div>`
+}
+
+// Local (Europe/Budapest) short timestamp for the usage table.
+function llmFmtTime(epochSec) {
+  if (!Number.isFinite(epochSec)) return '—'
+  try {
+    return new Date(epochSec * 1000).toLocaleString([], {
+      timeZone: 'Europe/Budapest', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    })
+  } catch {
+    return '—'
+  }
+}
+
+// Usage metrics: how often the fleet invokes the local model, by agent / source
+// / task / day, plus the most recent calls. Read-only; refreshed with the page.
+async function llmRefreshUsage() {
+  const tilesEl = document.getElementById('llmUsageTiles')
+  if (!tilesEl) return
+  try {
+    const res = await fetch('/api/local-llm/usage')
+    const d = await res.json()
+
+    // Headline stat tiles
+    tilesEl.innerHTML = [
+      llmTile(t('localLlm.usage.total'), String(d.total || 0), 'ok'),
+      llmTile(t('localLlm.usage.today'), String(d.today || 0), 'ok'),
+      llmTile(t('localLlm.usage.last_7d'), String(d.last_7d || 0), 'ok'),
+    ].join('')
+
+    // By agent -- horizontal bars, already sorted count-desc by the backend
+    const callerEl = document.getElementById('llmUsageByCaller')
+    if (callerEl) {
+      const callers = Array.isArray(d.by_caller) ? d.by_caller : []
+      if (callers.length === 0) {
+        callerEl.innerHTML = `<div class="llm-empty">${t('localLlm.usage.none')}</div>`
+      } else {
+        const max = callers[0].count || 1
+        callerEl.innerHTML = callers.map(c => `<div class="llm-usage-bar-row">
+          <span class="llm-usage-bar-label" title="${escapeHtml(c.caller)}">${escapeHtml(c.caller)}</span>
+          <span class="llm-usage-bar-track"><span class="llm-usage-bar-fill" data-pct="${Math.round((c.count / max) * 100)}"></span></span>
+          <span class="llm-usage-bar-count">${c.count}</span>
+        </div>`).join('')
+        callerEl.querySelectorAll('.llm-usage-bar-fill').forEach(el =>
+          el.style.setProperty('--w', (el.dataset.pct || 0) + '%'))
+      }
+    }
+
+    // By source + task highlight (code) + status
+    const srcEl = document.getElementById('llmUsageBySource')
+    if (srcEl) {
+      const bySrc = d.by_source || { bare: 0, rag: 0 }
+      const tasks = Array.isArray(d.by_task) ? d.by_task : []
+      const codeTask = tasks.find(x => x.task === 'code')
+      const codeCount = codeTask ? codeTask.count : 0
+      const st = d.by_status || { ok: 0, err: 0 }
+      srcEl.innerHTML = `
+        <div class="llm-usage-kv"><span>${t('localLlm.usage.source_bare')}</span><span>${bySrc.bare || 0}</span></div>
+        <div class="llm-usage-kv"><span>${t('localLlm.usage.source_rag')}</span><span>${bySrc.rag || 0}</span></div>
+        <div class="llm-usage-kv highlight"><span>${t('localLlm.usage.code_calls')}</span><span>${codeCount}</span></div>
+        <div class="llm-usage-kv"><span>${t('localLlm.usage.status_ok')}</span><span>${st.ok || 0}</span></div>
+        <div class="llm-usage-kv"><span>${t('localLlm.usage.status_err')}</span><span class="${(st.err || 0) > 0 ? 'llm-usage-err' : ''}">${st.err || 0}</span></div>
+        <div class="llm-usage-kv muted"><span>${t('localLlm.usage.ui_probes')}</span><span>${d.ui_probes || 0}</span></div>`
+    }
+
+    // By day -- compact 14-day mini bar chart (heights via --h custom property)
+    const dayEl = document.getElementById('llmUsageByDay')
+    if (dayEl) {
+      const days = Array.isArray(d.by_day) ? d.by_day : []
+      const dmax = days.reduce((m, x) => Math.max(m, x.count || 0), 0) || 1
+      dayEl.innerHTML = days.map(x => {
+        const pct = Math.round(((x.count || 0) / dmax) * 100)
+        return `<div class="llm-usage-day" title="${escapeHtml(x.date)} · ${x.count || 0}">
+          <span class="llm-usage-day-track"><span class="llm-usage-day-bar${(x.count || 0) === 0 ? ' zero' : ''}" data-pct="${pct}"></span></span>
+          <span class="llm-usage-day-x">${escapeHtml((x.date || '').slice(5))}</span>
+        </div>`
+      }).join('')
+      dayEl.querySelectorAll('.llm-usage-day-bar').forEach(el =>
+        el.style.setProperty('--h', (el.dataset.pct || 0) + '%'))
+    }
+
+    // Recent calls table
+    const recEl = document.getElementById('llmUsageRecent')
+    if (recEl) {
+      const recent = Array.isArray(d.recent) ? d.recent : []
+      if (recent.length === 0) {
+        recEl.innerHTML = `<div class="llm-empty">${t('localLlm.usage.none')}</div>`
+      } else {
+        const body = recent.map(r => `<tr>
+          <td>${escapeHtml(llmFmtTime(r.ts))}</td>
+          <td>${escapeHtml(r.caller || '')}</td>
+          <td>${escapeHtml(r.task || '')}</td>
+          <td>${escapeHtml(r.source || '')}</td>
+          <td class="llm-usage-num">${Number.isFinite(r.ms) ? r.ms : 0}</td>
+          <td><span class="llm-usage-status ${r.status === 'err' ? 'err' : 'ok'}">${r.status === 'err' ? t('localLlm.usage.status_err') : t('localLlm.usage.status_ok')}</span></td>
+        </tr>`).join('')
+        recEl.innerHTML = `<table class="llm-usage-table">
+          <thead><tr>
+            <th>${t('localLlm.usage.col_time')}</th>
+            <th>${t('localLlm.usage.col_agent')}</th>
+            <th>${t('localLlm.usage.col_task')}</th>
+            <th>${t('localLlm.usage.col_source')}</th>
+            <th class="llm-usage-num">${t('localLlm.usage.col_ms')}</th>
+            <th>${t('localLlm.usage.col_status')}</th>
+          </tr></thead>
+          <tbody>${body}</tbody>
+        </table>`
+      }
+    }
+  } catch {
+    tilesEl.innerHTML = `<div class="llm-empty">${t('localLlm.load_error')}</div>`
+  }
+}
+
+async function llmSwapModel(model) {
+  try {
+    const res = await fetch('/api/local-llm/model', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    })
+    const d = await res.json()
+    if (!res.ok) { showToast(d.error || t('localLlm.load_error')); return }
+    showToast(t('localLlm.models.swapped', { model }))
+    llmRefreshStatus()
+    llmRefreshRecs()
+  } catch {
+    showToast(t('localLlm.load_error'))
+  }
+}
+
+// --- Curated coding-model recommendations (6 GB GPU) -----------------------
+const LLM_FIT_KEY = { fits: 'localLlm.rec.fit_fits', tight: 'localLlm.rec.fit_tight', spills: 'localLlm.rec.fit_spills' }
+
+async function llmRefreshRecs() {
+  const el = document.getElementById('llmRecs')
+  if (!el) return
+  try {
+    const res = await fetch('/api/local-llm/model-recommendations')
+    const d = await res.json()
+    if (!res.ok) { el.innerHTML = `<div class="llm-empty">${d.error || t('localLlm.rec.load_error')}</div>`; return }
+    const models = Array.isArray(d.models) ? d.models : []
+    if (models.length === 0) { el.innerHTML = `<div class="llm-empty">${t('localLlm.rec.load_error')}</div>`; return }
+    el.innerHTML = models.map(m => {
+      const fitKey = LLM_FIT_KEY[m.gpu_fit] || 'localLlm.rec.fit_fits'
+      const note = m.note_key ? t(m.note_key) : ''
+      return `<div class="llm-model-row llm-rec-row${m.active ? ' active' : ''}">
+        <div class="llm-model-info">
+          <span class="llm-model-name">${escapeHtml(m.name)}</span>
+          <span class="llm-rec-meta">
+            <span class="llm-rec-params">${escapeHtml(m.params || '')}</span>
+            <span class="llm-model-size">${escapeHtml((m.size_gb != null ? m.size_gb : 0) + ' GB')}</span>
+            <span class="llm-fit-badge ${escapeHtml(m.gpu_fit || '')}">${t(fitKey)}</span>
+          </span>
+          ${note ? `<span class="llm-rec-note">${escapeHtml(note)}</span>` : ''}
+        </div>
+        <div class="llm-model-actions">
+          ${m.active
+            ? `<span class="llm-badge-active">${t('localLlm.models.active')}</span>`
+            : `<button class="btn-secondary btn-compact llm-rec-pull-btn" data-model="${escapeHtml(m.name)}">${t('localLlm.rec.pull_btn')}</button>`}
+        </div>
+      </div>`
+    }).join('')
+    el.querySelectorAll('.llm-rec-pull-btn').forEach(b =>
+      b.addEventListener('click', () => {
+        const input = document.getElementById('llmPullInput')
+        if (input) input.value = b.dataset.model
+        llmStartPull(b.dataset.model)
+      }))
+  } catch {
+    el.innerHTML = `<div class="llm-empty">${t('localLlm.rec.load_error')}</div>`
+  }
+}
+
+// --- HuggingFace GGUF model search (Ollama-pullable) -----------------------
+function llmFmtCount(n) {
+  const v = Number(n)
+  if (!Number.isFinite(v) || v <= 0) return '0'
+  if (v >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M'
+  if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'k'
+  return String(v)
+}
+
+async function llmHfSearch() {
+  const el = document.getElementById('llmHfResults')
+  const btn = document.getElementById('llmHfSearchBtn')
+  if (!el) return
+  const query = (document.getElementById('llmHfQuery')?.value || '').trim()
+  const task = document.getElementById('llmHfTask')?.value ?? 'text-generation'
+  const sort = document.getElementById('llmHfSort')?.value || 'downloads'
+  const gguf = document.getElementById('llmHfGguf')?.checked ? 'true' : 'false'
+  el.innerHTML = `<div class="llm-empty">${t('localLlm.hf.searching')}</div>`
+  if (btn) btn.disabled = true
+  try {
+    const params = new URLSearchParams({ query, task, sort, gguf, limit: '20' })
+    const res = await fetch(`/api/local-llm/hf-search?${params.toString()}`)
+    const d = await res.json()
+    if (!res.ok) { el.innerHTML = `<div class="llm-empty">${escapeHtml(d.error || t('localLlm.hf.error'))}</div>`; return }
+    const results = Array.isArray(d.results) ? d.results : []
+    if (results.length === 0) { el.innerHTML = `<div class="llm-empty">${t('localLlm.hf.empty')}</div>`; return }
+    const count = `<div class="llm-hf-count">${t('localLlm.hf.result_count', { count: results.length })}</div>`
+    const rows = results.map(r => {
+      const dl = `<span class="llm-hf-stat" title="${t('localLlm.hf.dl')}">↓ ${llmFmtCount(r.downloads)}</span>`
+      const lk = `<span class="llm-hf-stat" title="${t('localLlm.hf.likes')}">♥ ${llmFmtCount(r.likes)}</span>`
+      const badge = r.gguf ? `<span class="llm-fit-badge fits">${t('localLlm.hf.gguf_badge')}</span>` : ''
+      const pullTarget = r.ollama_pull ? String(r.ollama_pull).replace(/^ollama pull /, '') : ''
+      const action = (r.gguf && pullTarget)
+        ? `<button class="btn-secondary btn-compact llm-hf-pull-btn" data-model="${escapeHtml(pullTarget)}">${t('localLlm.hf.pull_btn')}</button>`
+        : `<span class="llm-hf-nogguf">${t('localLlm.hf.not_gguf')}</span>`
+      return `<div class="llm-model-row llm-hf-row">
+        <div class="llm-model-info">
+          <a class="llm-model-name llm-hf-link" href="${escapeHtml(r.hf_url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.id || '?')}</a>
+          <span class="llm-rec-meta">${dl}${lk}${badge}</span>
+        </div>
+        <div class="llm-model-actions">${action}</div>
+      </div>`
+    }).join('')
+    el.innerHTML = count + rows
+    el.querySelectorAll('.llm-hf-pull-btn').forEach(b =>
+      b.addEventListener('click', () => {
+        const input = document.getElementById('llmPullInput')
+        if (input) input.value = b.dataset.model
+        llmStartPull(b.dataset.model)
+      }))
+  } catch {
+    el.innerHTML = `<div class="llm-empty">${t('localLlm.hf.error')}</div>`
+  } finally {
+    if (btn) btn.disabled = false
+  }
+}
+
+async function llmStartPull(modelArg) {
+  const input = document.getElementById('llmPullInput')
+  const model = (modelArg || input.value || '').trim()
+  const prog = document.getElementById('llmPullProgress')
+  if (!model) { showToast(t('localLlm.models.pull_empty')); return }
+  prog.hidden = false
+  prog.textContent = t('localLlm.models.pull_starting')
+  try {
+    const res = await fetch('/api/local-llm/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    })
+    const d = await res.json()
+    if (!res.ok) { prog.textContent = d.error || t('localLlm.load_error'); return }
+    llmPollPull(d.job_id)
+  } catch {
+    prog.textContent = t('localLlm.load_error')
+  }
+}
+
+function llmPollPull(jobId) {
+  const prog = document.getElementById('llmPullProgress')
+  if (_llmPullTimer) clearInterval(_llmPullTimer)
+  _llmPullTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/local-llm/pull-status?job_id=${encodeURIComponent(jobId)}`)
+      const d = await res.json()
+      if (!res.ok) { prog.textContent = d.error || t('localLlm.load_error'); clearInterval(_llmPullTimer); return }
+      if (d.done) {
+        clearInterval(_llmPullTimer)
+        if (d.ok) {
+          prog.textContent = t('localLlm.models.pull_done', { model: d.model })
+          showToast(t('localLlm.models.pull_done', { model: d.model }))
+          llmRefreshStatus()
+          llmRefreshRecs()
+        } else {
+          prog.textContent = (d.error || t('localLlm.models.pull_failed'))
+        }
+      } else {
+        prog.textContent = `${t('localLlm.models.pulling')}: ${d.last_line || ''}`
+      }
+    } catch {
+      prog.textContent = t('localLlm.load_error')
+      clearInterval(_llmPullTimer)
+    }
+  }, 1500)
+}
+
+async function llmRunTest() {
+  const promptEl = document.getElementById('llmTestPrompt')
+  const out = document.getElementById('llmTestOutput')
+  const btn = document.getElementById('llmTestBtn')
+  const prompt = (promptEl.value || '').trim()
+  if (!prompt) { showToast(t('localLlm.test.empty')); return }
+  out.hidden = false
+  out.className = 'llm-test-output'
+  out.textContent = t('localLlm.test.running')
+  btn.disabled = true
+  try {
+    const res = await fetch('/api/local-llm/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    })
+    const d = await res.json()
+    if (!res.ok) {
+      out.className = 'llm-test-output error'
+      out.textContent = d.error || t('localLlm.load_error')
+    } else {
+      out.className = 'llm-test-output'
+      out.textContent = d.response || t('localLlm.test.no_output')
+    }
+  } catch {
+    out.className = 'llm-test-output error'
+    out.textContent = t('localLlm.load_error')
+  } finally {
+    btn.disabled = false
+  }
+}
+
+async function llmRefreshLogs() {
+  const term = document.getElementById('llmTerminal')
+  if (!term) return
+  try {
+    const res = await fetch(`/api/local-llm/logs?source=${_llmLogSource}&lines=200`)
+    const d = await res.json()
+    if (d.note && (!d.lines || d.lines.length === 0)) {
+      term.innerHTML = `<span class="llm-muted">${escapeHtml(d.note)}</span>`
+      return
+    }
+    const lines = Array.isArray(d.lines) ? d.lines : []
+    // Preserve scroll-at-bottom behaviour.
+    const atBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 40
+    term.textContent = lines.length ? lines.join('\n') : t('localLlm.logs.empty')
+    if (atBottom) term.scrollTop = term.scrollHeight
+  } catch {
+    term.innerHTML = `<span class="llm-muted">${t('localLlm.load_error')}</span>`
+  }
+}
+
+// Wire the local-llm page controls once at load.
+;(function initLocalLlm() {
+  const refreshBtn = document.getElementById('llmRefreshBtn')
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { llmRefreshStatus(); llmRefreshRecs(); llmRefreshLogs(); llmRefreshUsage(); llmRefreshCategories() })
+  // Close any open category info-tooltip (card 8b4ddcf0) on outside click or Escape. Bound once
+  // here rather than per-render, since llmRefreshCategories() re-renders the list on every poll.
+  document.addEventListener('click', (e) => {
+    const list = document.getElementById('llmCategoriesList')
+    if (!list || list.contains(e.target)) return
+    list.querySelectorAll('.llm-category-tooltip').forEach(t => { t.hidden = true })
+    list.querySelectorAll('.llm-category-info-btn').forEach(b => b.setAttribute('aria-expanded', 'false'))
+  })
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return
+    const list = document.getElementById('llmCategoriesList')
+    if (!list) return
+    list.querySelectorAll('.llm-category-tooltip').forEach(t => { t.hidden = true })
+    list.querySelectorAll('.llm-category-info-btn').forEach(b => b.setAttribute('aria-expanded', 'false'))
+  })
+  const hfBtn = document.getElementById('llmHfSearchBtn')
+  if (hfBtn) hfBtn.addEventListener('click', () => llmHfSearch())
+  const hfQuery = document.getElementById('llmHfQuery')
+  if (hfQuery) hfQuery.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); llmHfSearch() } })
+  const pullBtn = document.getElementById('llmPullBtn')
+  if (pullBtn) pullBtn.addEventListener('click', () => llmStartPull())
+  const testBtn = document.getElementById('llmTestBtn')
+  if (testBtn) testBtn.addEventListener('click', llmRunTest)
+  const promptEl = document.getElementById('llmTestPrompt')
+  const countEl = document.getElementById('llmTestCount')
+  if (promptEl && countEl) {
+    const upd = () => { countEl.textContent = `${promptEl.value.length} / 4000` }
+    promptEl.addEventListener('input', upd)
+    upd()
+  }
+  document.querySelectorAll('.llm-log-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.llm-log-tab').forEach(x => x.classList.remove('active'))
+      tab.classList.add('active')
+      _llmLogSource = tab.dataset.source === 'ollama' ? 'ollama' : 'bridge'
+      llmRefreshLogs()
+    })
+  })
+})()
 
 // ============================================================
 // === Status ===
