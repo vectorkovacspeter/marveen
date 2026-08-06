@@ -109,3 +109,6 @@ docs/superpowers/
 
 # Local dev-only compose override (live-mount web/ for UI iteration)
 docker-compose.override.yml
+
+# Local-only projekt-állapot (érzékeny munkaadat, nem pusholjuk)
+docs/STATE.md
